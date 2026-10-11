@@ -56,6 +56,7 @@ type Bizmodel struct {
 	btype   *BizModelType
 	t       pkgtree.Tree
 	checker policy.Checker
+	bus     pkgbus.Bus
 }
 
 func newBizmodel(id string, be backend.Backend, t pkgtree.Tree, store pkgmeta.Store, wsID, ownerID string, bus pkgbus.Bus) *Bizmodel {
@@ -67,8 +68,12 @@ func newBizmodel(id string, be backend.Backend, t pkgtree.Tree, store pkgmeta.St
 		}
 	}
 	checker := policy.NewChecker(store, wsID, ownerID, bus)
-	return &Bizmodel{id: id, btype: btype, t: t, checker: checker}
+	if w, ok := t.(pkgtree.Watchable); ok {
+		_ = w.Watch(bus)
+	}
+	return &Bizmodel{id: id, btype: btype, t: t, checker: checker, bus: bus}
 }
+
 
 func (b *Bizmodel) ID() string          { return b.id }
 func (b *Bizmodel) Type() *BizModelType { return b.btype }
@@ -109,7 +114,14 @@ func (b *Bizmodel) Call(ctx context.Context, opName string, path string, args an
 	if namedOp.Op == nil {
 		return nil, fmt.Errorf("op not found: %s for subkind %s", opName, subKind)
 	}
-	return namedOp.Op(ctx, b.t, pkgtree.OpArgs{Path: path, Args: args})
+	result, err := namedOp.Op(ctx, b.t, pkgtree.OpArgs{Path: path, Args: args})
+	if err != nil {
+		return nil, err
+	}
+	if namedOp.UpdateOp != "" {
+		b.bus.Publish("tree.update", pkgtree.UpdateEvent{Path: path, Op: namedOp.UpdateOp})
+	}
+	return result, nil
 }
 
 func inferSubKind(opName string, btype *BizModelType) string {

@@ -45,7 +45,14 @@ type Workspace struct {
 
 func (w *Workspace) ID() string      { return w.id }
 func (w *Workspace) OwnerID() string { return w.ownerID }
-func (w *Workspace) Close() error    { return nil }
+
+// Close 关闭 meta store 并从全局缓存中移除
+func (w *Workspace) Close() error {
+	wsMu.Lock()
+	delete(wsMap, w.id)
+	wsMu.Unlock()
+	return w.store.Close()
+}
 
 // Bus 返回 workspace 的事件总线，供下游 LLM pipeline / UI 层挂载
 func (w *Workspace) Bus() Bus { return &busAdapter{w.bus} }

@@ -22,7 +22,9 @@ type ExternalOp struct {
 	Name        string
 	Description string
 	Schema      map[string]any
-	Op          func(ctx context.Context, t Tree, args OpArgs) (any, error)
+	// UpdateOp 非空时表示此 op 是写操作，执行成功后引擎会发布 tree.update 事件
+	UpdateOp UpdateOp
+	Op       func(ctx context.Context, t Tree, args OpArgs) (any, error)
 }
 
 // RegisterBackend 注册自定义 backend，必须在 OpenWorkspace 之前调用。
@@ -54,6 +56,7 @@ func (a *externalBackendAdapter) OpsForSubKind(kind string) []pkgtree.NamedOp {
 			Name:        op.Name,
 			Description: op.Description,
 			Schema:      op.Schema,
+			UpdateOp:    op.UpdateOp,
 			Op: func(ctx context.Context, t pkgtree.Tree, args pkgtree.OpArgs) (any, error) {
 				return op.Op(ctx, &treeWrapper{t}, OpArgs{Path: args.Path, Args: args.Args})
 			},

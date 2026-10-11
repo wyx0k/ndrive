@@ -49,8 +49,14 @@ func (b *bus) Subscribe(topic string, handler func(any)) (uint64, func()) {
 	}
 }
 
+var ErrHandlerExists = errors.New("handler already registered for topic")
+
 func (b *bus) Handle(topic string, handler func(ctx context.Context, req any) (any, error)) func() {
 	b.mu.Lock()
+	if _, exists := b.handlers[topic]; exists {
+		b.mu.Unlock()
+		panic("ntd/bus: " + ErrHandlerExists.Error() + ": " + topic)
+	}
 	b.handlers[topic] = handler
 	b.mu.Unlock()
 	return func() {

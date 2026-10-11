@@ -67,6 +67,8 @@ func OpenWorkspace(ctx context.Context, wsID, ownerID string, cfg Config) (*Work
 	wsMu.Lock()
 	defer wsMu.Unlock()
 	if ws, ok := wsMap[wsID]; ok {
+		// 命中缓存，关闭本次新建的 store 避免连接泄漏
+		_ = store.Close()
 		return ws, nil
 	}
 	ws, err := openWorkspace(ctx, wsID, ownerID, store, b)

@@ -1,6 +1,10 @@
 package ntd
 
-import "context"
+import (
+	"context"
+
+	pkgtree "ntd/pkg/tree"
+)
 
 // Node 树节点（全数据）
 type Node struct {
@@ -31,3 +35,16 @@ type Tree interface {
 	Search(ctx context.Context, pattern string) ([]*Brief, error)
 	Delete(ctx context.Context, path string) error
 }
+
+// UpdateOp 文件变更类型，是 pkg/tree.UpdateOp 的别名
+type UpdateOp = pkgtree.UpdateOp
+
+const (
+	UpdateCreate UpdateOp = "create"
+	UpdateWrite  UpdateOp = "write"
+	UpdateDelete UpdateOp = "delete"
+	UpdateRename UpdateOp = "rename"
+)
+
+// UpdateEvent tree.update 事件 payload，是 pkg/tree.UpdateEvent 的别名
+type UpdateEvent = pkgtree.UpdateEvent

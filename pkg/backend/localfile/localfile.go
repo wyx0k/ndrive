@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/rjeczalik/notify"
 	"ntd/pkg/backend"
 	"ntd/pkg/subkind"
 	"ntd/pkg/tree"
@@ -75,7 +76,8 @@ func (b *localfileBackend) NewTree(cfg backend.Config) (tree.Tree, error) {
 }
 
 type localTree struct {
-	root string
+	root   string
+	stopCh chan struct{}
 }
 
 func (t *localTree) abs(path string) string {
@@ -107,6 +109,9 @@ func (t *localTree) List(ctx context.Context, prefix string) ([]*tree.Node, erro
 		}
 		rel, _ := filepath.Rel(t.root, p)
 		rel = "/" + filepath.ToSlash(rel)
+		if rel == prefix {
+			return nil // 跳过 prefix 节点自身
+		}
 		sk := "file"
 		if d.IsDir() {
 			sk = "dir"
@@ -126,6 +131,9 @@ func (t *localTree) ListWithBrief(ctx context.Context, prefix string) ([]*tree.B
 		}
 		rel, _ := filepath.Rel(t.root, p)
 		rel = "/" + filepath.ToSlash(rel)
+		if rel == prefix {
+			return nil // 跳过 prefix 节点自身
+		}
 		sk := "file"
 		if d.IsDir() {
 			sk = "dir"
@@ -153,6 +161,9 @@ func (t *localTree) Search(ctx context.Context, pattern string) ([]*tree.Brief, 
 		}
 		rel, _ := filepath.Rel(t.root, p)
 		rel = "/" + filepath.ToSlash(rel)
+		if rel == "/" {
+			return nil // 跳过根节点
+		}
 		name := d.Name()
 		if !matchPattern(pattern, rel) && !matchPattern(pattern, name) {
 			return nil
@@ -229,6 +240,7 @@ func dirOps() []tree.NamedOp {
 			Name:        "dir-mkdir",
 			Description: "创建目录",
 			Schema:      map[string]any{"type": "object", "properties": map[string]any{}},
+			UpdateOp:    tree.UpdateCreate,
 			Op: func(ctx context.Context, t tree.Tree, args tree.OpArgs) (any, error) {
 				return nil, os.MkdirAll(t.(*localTree).abs(args.Path), 0755)
 			},
@@ -237,6 +249,7 @@ func dirOps() []tree.NamedOp {
 			Name:        "dir-rm",
 			Description: "删除目录",
 			Schema:      map[string]any{"type": "object", "properties": map[string]any{}},
+			UpdateOp:    tree.UpdateDelete,
 			Op: func(ctx context.Context, t tree.Tree, args tree.OpArgs) (any, error) {
 				return nil, os.RemoveAll(t.(*localTree).abs(args.Path))
 			},
@@ -256,6 +269,7 @@ func fileOps() []tree.NamedOp {
 					"body": map[string]any{"type": "string"},
 				},
 			},
+			UpdateOp: tree.UpdateWrite,
 			Op: func(ctx context.Context, t tree.Tree, args tree.OpArgs) (any, error) {
 				m, _ := args.Args.(map[string]any)
 				body, _ := m["body"].(string)
@@ -273,6 +287,7 @@ func fileOps() []tree.NamedOp {
 					"body":   map[string]any{"type": "string"},
 				},
 			},
+			UpdateOp: tree.UpdateWrite,
 			Op: func(ctx context.Context, t tree.Tree, args tree.OpArgs) (any, error) {
 				lt := t.(*localTree)
 				m, _ := args.Args.(map[string]any)
@@ -293,6 +308,7 @@ func fileOps() []tree.NamedOp {
 			Name:        "file-read",
 			Description: "读取文件内容",
 			Schema:      map[string]any{"type": "object", "properties": map[string]any{}},
+			// 读操作不设 UpdateOp
 			Op: func(ctx context.Context, t tree.Tree, args tree.OpArgs) (any, error) {
 				data, err := os.ReadFile(t.(*localTree).abs(args.Path))
 				return string(data), err
@@ -325,5 +341,54 @@ func formatValue(v any) string {
 		return "[" + strings.Join(parts, ", ") + "]"
 	default:
 		return ""
+	}
+}
+
+// Watch 启动文件系统监听，变更事件通过 pub 发布到 "tree.update"
+func (t *localTree) Watch(pub tree.Publisher) error {
+	ch := make(chan notify.EventInfo, 64)
+	// "..." 表示递归监听，notify 内部用系统原生递归 API，无需手动 WalkDir
+	if err := notify.Watch(t.root+"/...", ch, notify.All); err != nil {
+		return err
+	}
+	t.stopCh = make(chan struct{})
+	go t.watchLoop(pub, ch)
+	return nil
+}
+
+func (t *localTree) watchLoop(pub tree.Publisher, ch chan notify.EventInfo) {
+	defer notify.Stop(ch)
+	for {
+		select {
+		case <-t.stopCh:
+			return
+		case ei, ok := <-ch:
+			if !ok {
+				return
+			}
+			rel, _ := filepath.Rel(t.root, ei.Path())
+			rel = "/" + filepath.ToSlash(rel)
+			pub.Publish("tree.update", tree.UpdateEvent{Path: rel, Op: notifyEventToUpdateOp(ei.Event())})
+		}
+	}
+}
+
+func (t *localTree) StopWatch() {
+	if t.stopCh != nil {
+		close(t.stopCh)
+		t.stopCh = nil
+	}
+}
+
+func notifyEventToUpdateOp(e notify.Event) tree.UpdateOp {
+	switch e {
+	case notify.Create:
+		return tree.UpdateCreate
+	case notify.Remove:
+		return tree.UpdateDelete
+	case notify.Rename:
+		return tree.UpdateRename
+	default:
+		return tree.UpdateWrite
 	}
 }

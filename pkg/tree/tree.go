@@ -41,4 +41,33 @@ type NamedOp struct {
 	Description string
 	Schema      map[string]any
 	Op          Op
+	// UpdateOp 非空时表示此 op 是写操作，执行成功后引擎会发布 tree.update 事件
+	UpdateOp UpdateOp
+}
+
+// UpdateOp 文件变更类型
+type UpdateOp string
+
+const (
+	UpdateCreate UpdateOp = "create"
+	UpdateWrite  UpdateOp = "write"
+	UpdateDelete UpdateOp = "delete"
+	UpdateRename UpdateOp = "rename"
+)
+
+// UpdateEvent tree.update 事件 payload
+type UpdateEvent struct {
+	Path string
+	Op   UpdateOp
+}
+
+// Publisher bus 发布接口最小子集
+type Publisher interface {
+	Publish(topic string, payload any)
+}
+
+// Watchable 可选接口，backend tree 实现后由引擎注入 bus 并启动监听
+type Watchable interface {
+	Watch(pub Publisher) error
+	StopWatch()
 }
