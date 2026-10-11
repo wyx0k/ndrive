@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"log"
 
-	"ntd"
+	"github.com/wyx0k/ndrive"
 )
 
 func main() {
@@ -57,7 +57,7 @@ func main() {
 		"withfm": true,
 		"fm": map[string]any{
 			"title": "Hello ntd",
-			"tags":  []any{"demo", "ntd"},
+			"tags":  []any{"demo", "github.com/wyx0k/ndrive"},
 		},
 		"body": "# Hello ntd\n\n这是一个演示文件。\n",
 	}); err != nil {

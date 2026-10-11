@@ -3,8 +3,8 @@ package backend
 import (
 	"errors"
 
-	"ntd/pkg/subkind"
-	"ntd/pkg/tree"
+	"github.com/wyx0k/ndrive/pkg/subkind"
+	"github.com/wyx0k/ndrive/pkg/tree"
 )
 
 var ErrBackendConflict = errors.New("backend name conflict")

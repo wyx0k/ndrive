@@ -6,11 +6,11 @@ import (
 	"errors"
 	"fmt"
 
-	"ntd/pkg/backend"
-	pkgbus "ntd/pkg/bus"
-	pkgctx "ntd/pkg/ctx"
-	pkgmeta "ntd/pkg/meta"
-	"ntd/pkg/policy"
+	"github.com/wyx0k/ndrive/pkg/backend"
+	pkgbus "github.com/wyx0k/ndrive/pkg/bus"
+	pkgctx "github.com/wyx0k/ndrive/pkg/ctx"
+	pkgmeta "github.com/wyx0k/ndrive/pkg/meta"
+	"github.com/wyx0k/ndrive/pkg/policy"
 )
 
 var (

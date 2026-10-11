@@ -11,9 +11,9 @@ import (
 	"strings"
 
 	"github.com/rjeczalik/notify"
-	"ntd/pkg/backend"
-	"ntd/pkg/subkind"
-	"ntd/pkg/tree"
+	"github.com/wyx0k/ndrive/pkg/backend"
+	"github.com/wyx0k/ndrive/pkg/subkind"
+	"github.com/wyx0k/ndrive/pkg/tree"
 )
 
 const Name = "local_file"

@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"ntd"
+	"github.com/wyx0k/ndrive"
 )
 
 // TestE2E 模拟下游应用完整使用流程：

@@ -5,9 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 
-	"ntd/pkg/backend"
-	"ntd/pkg/subkind"
-	"ntd/pkg/tree"
+	"github.com/wyx0k/ndrive/pkg/backend"
+	"github.com/wyx0k/ndrive/pkg/subkind"
+	"github.com/wyx0k/ndrive/pkg/tree"
 )
 
 const Name = "remote_sql"

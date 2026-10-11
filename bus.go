@@ -3,7 +3,7 @@ package ntd
 import (
 	"context"
 
-	pkgbus "ntd/pkg/bus"
+	pkgbus "github.com/wyx0k/ndrive/pkg/bus"
 )
 
 // Bus 是对外暴露的事件总线接口

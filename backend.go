@@ -3,9 +3,9 @@ package ntd
 import (
 	"context"
 
-	"ntd/pkg/backend"
-	"ntd/pkg/subkind"
-	pkgtree "ntd/pkg/tree"
+	"github.com/wyx0k/ndrive/pkg/backend"
+	"github.com/wyx0k/ndrive/pkg/subkind"
+	pkgtree "github.com/wyx0k/ndrive/pkg/tree"
 )
 
 // BackendProvider 是下游实现自定义 backend 的接口，全部使用根包类型，无需导入 pkg/* 。

@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"ntd"
+	"github.com/wyx0k/ndrive"
 )
 
 func openTestWorkspace(t *testing.T) *ntd.Workspace {

@@ -3,7 +3,7 @@ package ntd
 import (
 	"context"
 
-	pkgtree "ntd/pkg/tree"
+	pkgtree "github.com/wyx0k/ndrive/pkg/tree"
 )
 
 // Node 树节点（全数据）

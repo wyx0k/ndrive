@@ -55,7 +55,7 @@ func (b *bus) Handle(topic string, handler func(ctx context.Context, req any) (a
 	b.mu.Lock()
 	if _, exists := b.handlers[topic]; exists {
 		b.mu.Unlock()
-		panic("ntd/bus: " + ErrHandlerExists.Error() + ": " + topic)
+		panic("github.com/wyx0k/ndrive/bus: " + ErrHandlerExists.Error() + ": " + topic)
 	}
 	b.handlers[topic] = handler
 	b.mu.Unlock()

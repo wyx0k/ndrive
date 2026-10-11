@@ -1,6 +1,6 @@
 package ntd
 
-import pkgpolicy "ntd/pkg/policy"
+import pkgpolicy "github.com/wyx0k/ndrive/pkg/policy"
 
 // PolicyMode 控制 owner 在 workspace 内的读写权限
 type PolicyMode int

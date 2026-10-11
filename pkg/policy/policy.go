@@ -7,8 +7,8 @@ import (
 	"fmt"
 	"strings"
 
-	"ntd/pkg/bus"
-	"ntd/pkg/meta"
+	"github.com/wyx0k/ndrive/pkg/bus"
+	"github.com/wyx0k/ndrive/pkg/meta"
 )
 
 var ErrPolicyDenied = errors.New("policy denied")

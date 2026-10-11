@@ -6,17 +6,17 @@ import (
 	"fmt"
 	"sync"
 
-	"ntd/pkg/backend"
-	"ntd/pkg/backend/localbadger"
-	"ntd/pkg/backend/localfile"
-	"ntd/pkg/backend/localsqlite"
-	"ntd/pkg/backend/remotemongo"
-	"ntd/pkg/backend/remotesql"
-	pkgbus "ntd/pkg/bus"
-	pkgid "ntd/pkg/id"
-	pkgmeta "ntd/pkg/meta"
-	"ntd/pkg/meta/mysql"
-	"ntd/pkg/meta/sqlite"
+	"github.com/wyx0k/ndrive/pkg/backend"
+	"github.com/wyx0k/ndrive/pkg/backend/localbadger"
+	"github.com/wyx0k/ndrive/pkg/backend/localfile"
+	"github.com/wyx0k/ndrive/pkg/backend/localsqlite"
+	"github.com/wyx0k/ndrive/pkg/backend/remotemongo"
+	"github.com/wyx0k/ndrive/pkg/backend/remotesql"
+	pkgbus "github.com/wyx0k/ndrive/pkg/bus"
+	pkgid "github.com/wyx0k/ndrive/pkg/id"
+	pkgmeta "github.com/wyx0k/ndrive/pkg/meta"
+	"github.com/wyx0k/ndrive/pkg/meta/mysql"
+	"github.com/wyx0k/ndrive/pkg/meta/sqlite"
 )
 
 // Config 总配置

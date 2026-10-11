@@ -1,4 +1,4 @@
-module ntd
+module github.com/wyx0k/ndrive
 
 go 1.27.0
 

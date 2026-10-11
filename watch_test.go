@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"ntd"
+	"github.com/wyx0k/ndrive"
 )
 
 func collectEvents(ch <-chan ntd.UpdateEvent, dur time.Duration) []ntd.UpdateEvent {

@@ -5,7 +5,7 @@ import (
 	"errors"
 	"strings"
 
-	"ntd/pkg/meta"
+	"github.com/wyx0k/ndrive/pkg/meta"
 
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"

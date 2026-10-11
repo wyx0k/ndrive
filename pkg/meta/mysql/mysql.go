@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"strings"
 
-	"ntd/pkg/meta"
+	"github.com/wyx0k/ndrive/pkg/meta"
 
 	"gorm.io/driver/mysql"
 	"gorm.io/gorm"
