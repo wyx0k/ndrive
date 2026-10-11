@@ -121,7 +121,7 @@ func (w *Workspace) CreateBizmodel(ctx context.Context, opts BizmodelOpts) (*Biz
 	if err := w.store.Put(ctx, key, data); err != nil {
 		return nil, err
 	}
-	return newBizmodel(opts.ID, be, t, w.store, w.id, w.ownerID, w.bus), nil
+	return newBizmodel(opts.ID, be, t, w.store, w.id, w.ownerID, w.bus, w), nil
 }
 
 // GetBizmodel 按 ID 获取已有 bizmodel
@@ -177,5 +177,5 @@ func (w *Workspace) loadBizmodel(data []byte) (*Bizmodel, error) {
 	if err != nil {
 		return nil, err
 	}
-	return newBizmodel(rec.ID, be, t, w.store, w.id, w.ownerID, w.bus), nil
+	return newBizmodel(rec.ID, be, t, w.store, w.id, w.ownerID, w.bus, w), nil
 }

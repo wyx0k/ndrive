@@ -3,6 +3,7 @@ package ntd
 import (
 	"context"
 	"fmt"
+	"sync"
 
 	"ntd/pkg/backend"
 	pkgbus "ntd/pkg/bus"
@@ -43,6 +44,19 @@ type NamedOp struct {
 	Schema      map[string]any
 }
 
+// BizmodelResolver 供 Procedure 获取其他 bizmodel，不暴露 Workspace 其他能力
+type BizmodelResolver interface {
+	GetBizmodel(ctx context.Context, bizID string) (*Bizmodel, error)
+}
+
+// Procedure 业务层复合操作，可读写树，受 policy 控制
+type Procedure struct {
+	Name        string
+	Description string
+	Schema      map[string]any
+	Fn          func(ctx context.Context, r BizmodelResolver, args any) (any, error)
+}
+
 // BizmodelOpts 创建 bizmodel 的参数
 type BizmodelOpts struct {
 	ID       string
@@ -52,14 +66,17 @@ type BizmodelOpts struct {
 
 // Bizmodel 业务模型句柄
 type Bizmodel struct {
-	id      string
-	btype   *BizModelType
-	t       pkgtree.Tree
-	checker policy.Checker
-	bus     pkgbus.Bus
+	id       string
+	btype    *BizModelType
+	t        pkgtree.Tree
+	checker  policy.Checker
+	bus      pkgbus.Bus
+	resolver BizmodelResolver
+	mu       sync.RWMutex
+	procs    map[string]Procedure
 }
 
-func newBizmodel(id string, be backend.Backend, t pkgtree.Tree, store pkgmeta.Store, wsID, ownerID string, bus pkgbus.Bus) *Bizmodel {
+func newBizmodel(id string, be backend.Backend, t pkgtree.Tree, store pkgmeta.Store, wsID, ownerID string, bus pkgbus.Bus, resolver BizmodelResolver) *Bizmodel {
 	btype := &BizModelType{Name: be.Name()}
 	for _, sk := range be.SubKinds() {
 		btype.SubKinds = append(btype.SubKinds, SubKind{Name: sk.Name, Description: sk.Description, Ops: sk.Ops})
@@ -71,13 +88,59 @@ func newBizmodel(id string, be backend.Backend, t pkgtree.Tree, store pkgmeta.St
 	if w, ok := t.(pkgtree.Watchable); ok {
 		_ = w.Watch(bus)
 	}
-	return &Bizmodel{id: id, btype: btype, t: t, checker: checker, bus: bus}
+	return &Bizmodel{id: id, btype: btype, t: t, checker: checker, bus: bus, resolver: resolver, procs: map[string]Procedure{}}
 }
 
 
 func (b *Bizmodel) ID() string          { return b.id }
 func (b *Bizmodel) Type() *BizModelType { return b.btype }
 func (b *Bizmodel) Ops() []NamedOp      { return b.btype.Ops }
+
+// RegisterProcedure 注册一个业务层复合操作，运行时动态注册
+func (b *Bizmodel) RegisterProcedure(p Procedure) {
+	b.mu.Lock()
+	b.procs[p.Name] = p
+	b.mu.Unlock()
+}
+
+// Procedures 返回所有已注册的 procedure（只读快照）
+func (b *Bizmodel) Procedures() []Procedure {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	out := make([]Procedure, 0, len(b.procs))
+	for _, p := range b.procs {
+		out = append(out, p)
+	}
+	return out
+}
+
+// CallProcedure 执行 procedure，受 policy 控制，执行前发 procedure.start，执行后发 procedure.done
+func (b *Bizmodel) CallProcedure(ctx context.Context, name string, args any) (any, error) {
+	if err := b.checker.Check(ctx, name); err != nil {
+		return nil, err
+	}
+	b.mu.RLock()
+	p, ok := b.procs[name]
+	b.mu.RUnlock()
+	if !ok {
+		return nil, fmt.Errorf("procedure not found: %s", name)
+	}
+	b.bus.Publish("procedure.start", ProcedureEvent{Name: name, BizmodelID: b.id})
+	result, err := p.Fn(ctx, b.resolver, args)
+	if err != nil {
+		b.bus.Publish("procedure.error", ProcedureEvent{Name: name, BizmodelID: b.id, Err: err})
+		return nil, err
+	}
+	b.bus.Publish("procedure.done", ProcedureEvent{Name: name, BizmodelID: b.id})
+	return result, nil
+}
+
+// ProcedureEvent procedure.start / procedure.done / procedure.error 的 payload
+type ProcedureEvent struct {
+	Name       string
+	BizmodelID string
+	Err        error
+}
 
 // Tree 返回包装后的 Tree（对外使用 ntd.Tree 接口）
 func (b *Bizmodel) Tree() Tree { return &treeWrapper{b.t} }
