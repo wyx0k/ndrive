@@ -47,6 +47,9 @@ func (w *Workspace) ID() string      { return w.id }
 func (w *Workspace) OwnerID() string { return w.ownerID }
 func (w *Workspace) Close() error    { return nil }
 
+// Bus 返回 workspace 的事件总线，供下游 LLM pipeline / UI 层挂载
+func (w *Workspace) Bus() Bus { return &busAdapter{w.bus} }
+
 // Context 返回注入了 wsID 和 ownerID 的 ctx，用于后续 Call/Tree 操作
 func (w *Workspace) Context(ctx context.Context) context.Context {
 	return pkgctx.WithOwner(pkgctx.WithWorkspace(ctx, w.id), w.ownerID)

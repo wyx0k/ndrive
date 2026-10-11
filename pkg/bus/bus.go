@@ -15,20 +15,22 @@ var (
 type Bus interface {
 	Publish(topic string, payload any)
 	Subscribe(topic string, handler func(any)) (subID uint64, unsubscribe func())
+	// Handle 注册请求处理器，用于 Request/Reply 模式；同一 topic 只能有一个 handler
+	Handle(topic string, handler func(ctx context.Context, req any) (any, error)) (unsubscribe func())
 	Request(ctx context.Context, topic string, req any) (any, error)
 }
 
 type bus struct {
-	mu      sync.RWMutex
-	subs    map[string]map[uint64]func(any)
-	counter atomic.Uint64
-	buf     int
+	mu       sync.RWMutex
+	subs     map[string]map[uint64]func(any)
+	handlers map[string]func(ctx context.Context, req any) (any, error)
+	counter  atomic.Uint64
 }
 
-func New(bufferSize int) Bus {
+func New(_ int) Bus {
 	return &bus{
-		subs: make(map[string]map[uint64]func(any)),
-		buf:  bufferSize,
+		subs:     make(map[string]map[uint64]func(any)),
+		handlers: make(map[string]func(ctx context.Context, req any) (any, error)),
 	}
 }
 
@@ -47,6 +49,17 @@ func (b *bus) Subscribe(topic string, handler func(any)) (uint64, func()) {
 	}
 }
 
+func (b *bus) Handle(topic string, handler func(ctx context.Context, req any) (any, error)) func() {
+	b.mu.Lock()
+	b.handlers[topic] = handler
+	b.mu.Unlock()
+	return func() {
+		b.mu.Lock()
+		delete(b.handlers, topic)
+		b.mu.Unlock()
+	}
+}
+
 func (b *bus) Publish(topic string, payload any) {
 	b.mu.RLock()
 	handlers := make([]func(any), 0, len(b.subs[topic]))
@@ -61,58 +74,10 @@ func (b *bus) Publish(topic string, payload any) {
 
 func (b *bus) Request(ctx context.Context, topic string, req any) (any, error) {
 	b.mu.RLock()
-	count := len(b.subs[topic])
+	h := b.handlers[topic]
 	b.mu.RUnlock()
-	if count == 0 {
+	if h == nil {
 		return nil, ErrNoSubscriber
 	}
-
-	ch := make(chan any, 1)
-	id := b.counter.Add(1)
-
-	b.mu.Lock()
-	if b.subs[topic] == nil {
-		b.subs[topic] = make(map[uint64]func(any))
-	}
-	b.subs[topic][id] = func(payload any) {
-		select {
-		case ch <- payload:
-		default:
-		}
-	}
-	b.mu.Unlock()
-
-	// 向除临时 handler 外的订阅者广播
-	b.mu.RLock()
-	handlers := make([]func(any), 0)
-	for hid, h := range b.subs[topic] {
-		if hid != id {
-			handlers = append(handlers, h)
-		}
-	}
-	b.mu.RUnlock()
-
-	if len(handlers) == 0 {
-		b.mu.Lock()
-		delete(b.subs[topic], id)
-		b.mu.Unlock()
-		return nil, ErrNoSubscriber
-	}
-
-	for _, h := range handlers {
-		h(req)
-	}
-
-	defer func() {
-		b.mu.Lock()
-		delete(b.subs[topic], id)
-		b.mu.Unlock()
-	}()
-
-	select {
-	case resp := <-ch:
-		return resp, nil
-	case <-ctx.Done():
-		return nil, ErrRequestTimeout
-	}
+	return h(ctx, req)
 }

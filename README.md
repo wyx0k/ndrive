@@ -107,12 +107,33 @@ ws.SetPolicy(ctx, ntd.RAsk)  // 所有操作需确认
 
 ## 事件总线
 
+Bus 提供两种模式：
+
+**单向广播**（fire-and-forget）
+
 ```go
 bus := ws.Bus()
-bus.Subscribe("policy.ask", func(ctx context.Context, req any) (any, error) {
-    // 展示给用户或 LLM，返回 policy.AskResponse{Approved: true/false}
+
+_, unsub := bus.Subscribe("my.topic", func(payload any) {
+    fmt.Println("received:", payload)
 })
-bus.Publish(ctx, "my.topic", payload)
+defer unsub()
+
+bus.Publish("my.topic", "hello")
 ```
+
+**请求/回复**（用于 `WAsk/RAsk` policy 确认）
+
+```go
+unsub := ws.Bus().Handle("policy.ask", func(ctx context.Context, req any) (any, error) {
+    ask := req.(policy.AskPayload)
+    // 展示给用户或 LLM 决策
+    approved := askUser(ask.Op, ask.Path)
+    return policy.AskResponse{Approved: approved}, nil
+})
+defer unsub()
+```
+
+`WAsk` 模式下每次写操作都会触发 `policy.ask`，handler 返回 `Approved: true` 才放行。没有注册 handler 时写操作直接被拒绝。
 
 Bus 是进程内通道，适合 LLM pipeline 和 UI 层挂载。跨进程场景由下游自行桥接。
