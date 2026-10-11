@@ -5,7 +5,6 @@ import (
 	"testing"
 
 	"ntd"
-	"ntd/pkg/policy"
 )
 
 func openTestWorkspace(t *testing.T) *ntd.Workspace {
@@ -109,7 +108,7 @@ func TestBusPolicyAskApproved(t *testing.T) {
 
 	// 注册自动批准的 policy.ask handler
 	unsub := ws.Bus().Handle("policy.ask", func(ctx context.Context, req any) (any, error) {
-		return policy.AskResponse{Approved: true}, nil
+		return ntd.AskResponse{Approved: true}, nil
 	})
 	defer unsub()
 
@@ -144,7 +143,7 @@ func TestBusPolicyAskDenied(t *testing.T) {
 
 	// 注册自动拒绝的 handler
 	unsub := ws.Bus().Handle("policy.ask", func(ctx context.Context, req any) (any, error) {
-		return policy.AskResponse{Approved: false}, nil
+		return ntd.AskResponse{Approved: false}, nil
 	})
 	defer unsub()
 
