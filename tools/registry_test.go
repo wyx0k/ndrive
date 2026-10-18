@@ -16,11 +16,11 @@ type stubPlugin struct {
 	dependsOn []tools.PluginID
 }
 
-func (s *stubPlugin) ID() tools.PluginID                 { return s.id }
-func (s *stubPlugin) Description() string                { return s.id + " desc" }
-func (s *stubPlugin) Schema() map[string]any             { return map[string]any{"type": "object"} }
-func (s *stubPlugin) DependsOn() []tools.PluginID        { return s.dependsOn }
-func (s *stubPlugin) Read() bool                        { return s.read }
+func (s *stubPlugin) ID() tools.PluginID          { return s.id }
+func (s *stubPlugin) Description() string         { return s.id + " desc" }
+func (s *stubPlugin) Schema() map[string]any      { return map[string]any{"type": "object"} }
+func (s *stubPlugin) DependsOn() []tools.PluginID { return s.dependsOn }
+func (s *stubPlugin) Read() bool                  { return s.read }
 func (s *stubPlugin) Call(_ context.Context, _ tools.Context, _ any) (any, error) {
 	return nil, nil
 }
@@ -33,7 +33,7 @@ func newAPI() *tools.ToolsAPI {
 
 func TestRegisterSuccess(t *testing.T) {
 	api := newAPI()
-	if err := api.Register(&stubPlugin{id: "util.echo"}); err != nil {
+	if err := api.Register(&stubPlugin{id: "util.echo"}, nil); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 	if got := api.Plugins()[`util.echo`]; got == nil {
@@ -43,7 +43,7 @@ func TestRegisterSuccess(t *testing.T) {
 
 func TestRegisterNilPlugin(t *testing.T) {
 	api := newAPI()
-	if err := api.Register(nil); err == nil {
+	if err := api.Register(nil, nil); err == nil {
 		t.Fatal("want error for nil plugin")
 	} else if !errors.Is(err, tools.ErrPluginInvalid) {
 		t.Errorf("want ErrPluginInvalid, got %v", err)
@@ -52,7 +52,7 @@ func TestRegisterNilPlugin(t *testing.T) {
 
 func TestRegisterInvalidID(t *testing.T) {
 	api := newAPI()
-	if err := api.Register(&stubPlugin{id: "single"}); err == nil {
+	if err := api.Register(&stubPlugin{id: "single"}, nil); err == nil {
 		t.Fatal("want error for single-segment id")
 	} else if !errors.Is(err, tools.ErrPluginInvalid) {
 		t.Errorf("want ErrPluginInvalid, got %v", err)
@@ -61,8 +61,8 @@ func TestRegisterInvalidID(t *testing.T) {
 
 func TestRegisterDuplicate(t *testing.T) {
 	api := newAPI()
-	_ = api.Register(&stubPlugin{id: "util.echo"})
-	if err := api.Register(&stubPlugin{id: "util.echo"}); err == nil {
+	_ = api.Register(&stubPlugin{id: "util.echo"}, nil)
+	if err := api.Register(&stubPlugin{id: "util.echo"}, nil); err == nil {
 		t.Fatal("want duplicate error")
 	} else if !errors.Is(err, tools.ErrPluginDuplicate) {
 		t.Errorf("want ErrPluginDuplicate, got %v", err)
@@ -75,7 +75,7 @@ func TestRegisterMissingDep(t *testing.T) {
 	err := api.Register(&stubPlugin{
 		id:        "a.b",
 		dependsOn: []tools.PluginID{"missing.thing"},
-	})
+	}, nil)
 	if err == nil {
 		t.Fatal("want missing dep error")
 	}
@@ -86,11 +86,11 @@ func TestRegisterMissingDep(t *testing.T) {
 
 func TestRegisterDepRegistered(t *testing.T) {
 	api := newAPI()
-	_ = api.Register(&stubPlugin{id: "store.db.read"})
+	_ = api.Register(&stubPlugin{id: "store.db.read"}, nil)
 	if err := api.Register(&stubPlugin{
 		id:        "func.calc",
 		dependsOn: []tools.PluginID{"store.db.read"},
-	}); err != nil {
+	}, nil); err != nil {
 		t.Fatalf("Register with dep: %v", err)
 	}
 }
@@ -98,11 +98,11 @@ func TestRegisterDepRegistered(t *testing.T) {
 func TestRegisterAtomic(t *testing.T) {
 	// 失败时 registry 不应被部分修改
 	api := newAPI()
-	_ = api.Register(&stubPlugin{id: "util.echo"})
+	_ = api.Register(&stubPlugin{id: "util.echo"}, nil)
 	err := api.Register(&stubPlugin{
 		id:        "a.b",
 		dependsOn: []tools.PluginID{"missing"},
-	})
+	}, nil)
 	if err == nil {
 		t.Fatal("want error")
 	}
@@ -164,7 +164,7 @@ func TestRegisterAllMissingDep(t *testing.T) {
 
 func TestRegisterAllDepOnPriorRegister(t *testing.T) {
 	api := newAPI()
-	_ = api.Register(&stubPlugin{id: "store.db.read"})
+	_ = api.Register(&stubPlugin{id: "store.db.read"}, nil)
 	err := api.RegisterAll([]tools.Plugin{
 		&stubPlugin{id: "func.calc", dependsOn: []tools.PluginID{"store.db.read"}},
 	})
@@ -226,7 +226,7 @@ func TestResolveEmpty(t *testing.T) {
 
 func TestResolveSinglePlugin(t *testing.T) {
 	api := newAPI()
-	_ = api.Register(&stubPlugin{id: "util.echo"})
+	_ = api.Register(&stubPlugin{id: "util.echo"}, nil)
 	order, err := api.Resolve()
 	if err != nil {
 		t.Errorf("Resolve: %v", err)
@@ -238,9 +238,9 @@ func TestResolveSinglePlugin(t *testing.T) {
 
 func TestResolveDepsFirst(t *testing.T) {
 	api := newAPI()
-	_ = api.Register(&stubPlugin{id: "store.db.read"})
-	_ = api.Register(&stubPlugin{id: "func.calc", dependsOn: []tools.PluginID{"store.db.read"}})
-	_ = api.Register(&stubPlugin{id: "func.print", dependsOn: []tools.PluginID{"func.calc"}})
+	_ = api.Register(&stubPlugin{id: "store.db.read"}, nil)
+	_ = api.Register(&stubPlugin{id: "func.calc", dependsOn: []tools.PluginID{"store.db.read"}}, nil)
+	_ = api.Register(&stubPlugin{id: "func.print", dependsOn: []tools.PluginID{"func.calc"}}, nil)
 
 	order, err := api.Resolve()
 	if err != nil {
@@ -256,10 +256,10 @@ func TestResolveDepsFirst(t *testing.T) {
 func TestResolveDAG(t *testing.T) {
 	api := newAPI()
 	// 多依赖汇聚：c → [a, b], d → [c]
-	_ = api.Register(&stubPlugin{id: "store.a"})
-	_ = api.Register(&stubPlugin{id: "store.b"})
-	_ = api.Register(&stubPlugin{id: "func.c", dependsOn: []tools.PluginID{"store.a", "store.b"}})
-	_ = api.Register(&stubPlugin{id: "func.d", dependsOn: []tools.PluginID{"func.c"}})
+	_ = api.Register(&stubPlugin{id: "store.a"}, nil)
+	_ = api.Register(&stubPlugin{id: "store.b"}, nil)
+	_ = api.Register(&stubPlugin{id: "func.c", dependsOn: []tools.PluginID{"store.a", "store.b"}}, nil)
+	_ = api.Register(&stubPlugin{id: "func.d", dependsOn: []tools.PluginID{"func.c"}}, nil)
 
 	order, err := api.Resolve()
 	if err != nil {
@@ -337,6 +337,131 @@ func TestCycleErrorMessage(t *testing.T) {
 	}
 	if !errors.Is(ce, tools.ErrPluginCycle) {
 		t.Error("CycleError should match ErrPluginCycle via Is")
+	}
+}
+
+// --- Register 初始配置传递给 StartPlugin ---
+
+// configuredStatefulStub 记录 StartPlugin 收到的 cfg，用于验证 Register(plugin, cfg)
+// 把初始配置正确传递到 StartPlugin。
+type configuredStatefulStub struct {
+	stubPlugin
+	startCfg  any
+	startErr  error
+	startCalls int
+	stopCalls int
+}
+
+func (c *configuredStatefulStub) StartPlugin(ws tools.Context, cfg any) error {
+	c.startCalls++
+	c.startCfg = cfg
+	return c.startErr
+}
+
+func (c *configuredStatefulStub) StopPlugin() error {
+	c.stopCalls++
+	return nil
+}
+
+func TestRegisterPassesInitialConfigToStartPlugin(t *testing.T) {
+	api := newAPI()
+	sp := &configuredStatefulStub{stubPlugin: stubPlugin{id: "fs.watch"}}
+	cfg := map[string]any{"path": "/data"}
+	if err := api.Register(sp, cfg); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	if sp.startCalls != 1 {
+		t.Errorf("want StartPlugin called once, got %d", sp.startCalls)
+	}
+	got, ok := sp.startCfg.(map[string]any)
+	if !ok || got["path"] != "/data" {
+		t.Errorf("StartPlugin did not receive cfg, got %v", sp.startCfg)
+	}
+}
+
+func TestRegisterNilConfigStillRegisters(t *testing.T) {
+	api := newAPI()
+	sp := &configuredStatefulStub{stubPlugin: stubPlugin{id: "fs.watch"}}
+	if err := api.Register(sp, nil); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	if sp.startCfg != nil {
+		t.Errorf("want nil cfg passed through, got %v", sp.startCfg)
+	}
+}
+
+// --- StatefulPlugin ---
+
+// statefulStub 是测试用的有状态 plugin，记录启停调用次数，可配置启动失败。
+type statefulStub struct {
+	stubPlugin
+	startErr   error
+	startCalls int
+	stopCalls  int
+}
+
+func (s *statefulStub) StartPlugin(ws tools.Context, cfg any) error {
+	s.startCalls++
+	return s.startErr
+}
+
+func (s *statefulStub) StopPlugin() error {
+	s.stopCalls++
+	return nil
+}
+
+func TestRegisterStatefulPluginStarts(t *testing.T) {
+	api := newAPI()
+	sp := &statefulStub{stubPlugin: stubPlugin{id: "fs.watch"}}
+	if err := api.Register(sp, nil); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	if sp.startCalls != 1 {
+		t.Errorf("want StartPlugin called once, got %d", sp.startCalls)
+	}
+}
+
+func TestRegisterStatefulPluginStartFailure(t *testing.T) {
+	api := newAPI()
+	sp := &statefulStub{stubPlugin: stubPlugin{id: "fs.watch"}, startErr: errors.New("boom")}
+	if err := api.Register(sp, nil); err == nil {
+		t.Fatal("want error from failed StartPlugin")
+	}
+	if _, exists := api.Plugins()["fs.watch"]; exists {
+		t.Error("plugin should not be registered after StartPlugin failure")
+	}
+}
+
+func TestStopAllPlugins(t *testing.T) {
+	api := newAPI()
+	sp1 := &statefulStub{stubPlugin: stubPlugin{id: "fs.watch"}}
+	sp2 := &statefulStub{stubPlugin: stubPlugin{id: "net.conn"}}
+	_ = api.Register(sp1, nil)
+	_ = api.Register(sp2, nil)
+	_ = api.Register(&stubPlugin{id: "util.echo"}, nil) // 非 stateful，不应受影响
+
+	if err := api.StopAllPlugins(); err != nil {
+		t.Fatalf("StopAllPlugins: %v", err)
+	}
+	if sp1.stopCalls != 1 || sp2.stopCalls != 1 {
+		t.Errorf("want both stopped once, got sp1=%d sp2=%d", sp1.stopCalls, sp2.stopCalls)
+	}
+}
+
+func TestRegisterAllStatefulRollback(t *testing.T) {
+	// batch 中第二个 plugin 启动失败，第一个已启动的应被回滚（Stop）
+	api := newAPI()
+	sp1 := &statefulStub{stubPlugin: stubPlugin{id: "a.b"}}
+	sp2 := &statefulStub{stubPlugin: stubPlugin{id: "c.d"}, startErr: errors.New("boom")}
+	err := api.RegisterAll([]tools.Plugin{sp1, sp2})
+	if err == nil {
+		t.Fatal("want error")
+	}
+	if sp1.startCalls != 1 || sp1.stopCalls != 1 {
+		t.Errorf("sp1 should be started then rolled back, got start=%d stop=%d", sp1.startCalls, sp1.stopCalls)
+	}
+	if len(api.Plugins()) != 0 {
+		t.Errorf("registry should be empty after rollback, got %d", len(api.Plugins()))
 	}
 }
 

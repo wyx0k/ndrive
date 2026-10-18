@@ -45,7 +45,7 @@ func TestOpenWorkspaceAPI(t *testing.T) {
 		Fn_: func(_ context.Context, _ tools.Context, args any) (any, error) {
 			return args, nil
 		},
-	}); err != nil {
+	}, nil); err != nil {
 		t.Errorf("Register: %v", err)
 	}
 	tl := ws.API().Tools()

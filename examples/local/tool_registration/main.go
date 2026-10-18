@@ -51,10 +51,10 @@ func main() {
 		Fn_: func(_ context.Context, _ tools.Context, _ any) (any, error) {
 			return time.Now().Format(time.RFC3339), nil
 		},
-	}))
+	}, nil))
 
 	// 2. 自定义 Plugin 接口：手写 ID/Description/Schema/DependsOn/Read/Call 六个方法。
-	must(ws.Register(newGreeterPlugin()))
+	must(ws.Register(newGreeterPlugin(), nil))
 
 	// 3. DependsOn：func.calc 依赖 util.now，内部通过 ws.API().Call 调用依赖。
 	must(ws.Register(tools.SimplePluginDef{
@@ -72,7 +72,7 @@ func main() {
 		Read_:      true,
 		DependsOn_: []tools.PluginID{"util.now"},
 		Fn_:        calcFn,
-	}))
+	}, nil))
 
 	// 4. RegisterAll：批量注册一组互相依赖的插件（含依赖校验 + 拓扑排序）。
 	batch := []tools.Plugin{

@@ -58,7 +58,7 @@ func main() {
 			ws.Bus().Publish("file.written", map[string]any{"path": path})
 			return map[string]any{"ok": true, "path": path}, nil
 		},
-	}); err != nil {
+	}, nil); err != nil {
 		panic(err)
 	}
 
@@ -84,7 +84,7 @@ func main() {
 			}
 			return map[string]any{"path": path, "body": string(data)}, nil
 		},
-	}); err != nil {
+	}, nil); err != nil {
 		panic(err)
 	}
 

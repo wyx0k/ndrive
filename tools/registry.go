@@ -41,8 +41,9 @@ func (e *CycleError) Is(target error) bool {
 
 // Register 注册一个 plugin。
 // 校验顺序：id 合法 → 不重名 → 所有 DependsOn 已注册。
-// 失败时 registry 不变（不部分修改）。
-func (a *ToolsAPI) Register(plugin Plugin) error {
+// 若 plugin 实现了 StatefulPlugin，校验通过后用 cfg 作为初始配置调 StartPlugin
+// （不需要初始配置传 nil）。失败时 registry 不变（不部分修改）。
+func (a *ToolsAPI) Register(plugin Plugin, cfg any) error {
 	if plugin == nil {
 		return fmt.Errorf("%w: nil plugin", ErrPluginInvalid)
 	}
@@ -57,6 +58,11 @@ func (a *ToolsAPI) Register(plugin Plugin) error {
 	for _, dep := range plugin.DependsOn() {
 		if _, ok := a.plugins[dep]; !ok {
 			return fmt.Errorf("%w: %s (needed by %s)", ErrPluginNotFound, dep, id)
+		}
+	}
+	if sp, ok := plugin.(StatefulPlugin); ok {
+		if err := sp.StartPlugin(a.ws, cfg); err != nil {
+			return fmt.Errorf("tools: plugin %s StartPlugin: %w", id, err)
 		}
 	}
 	a.plugins[id] = plugin
@@ -110,7 +116,25 @@ func (a *ToolsAPI) RegisterAll(plugins []Plugin) error {
 		return err
 	}
 
-	// 第四步：commit 到主 registry
+	// 第四步：按拓扑序启动 StatefulPlugin（cfg 传 nil，批量注册不支持 per-plugin 初始配置，
+	// 需要初始配置的 plugin 请用 Register(plugin, cfg) 单独注册）；
+	// 某个失败则回滚已启动的，batch 整体失败不 commit。
+	started := make([]StatefulPlugin, 0, len(order))
+	for _, id := range order {
+		sp, ok := temp[id].(StatefulPlugin)
+		if !ok {
+			continue
+		}
+		if err := sp.StartPlugin(a.ws, nil); err != nil {
+			for i := len(started) - 1; i >= 0; i-- {
+				_ = started[i].StopPlugin()
+			}
+			return fmt.Errorf("tools: plugin %s StartPlugin: %w", id, err)
+		}
+		started = append(started, sp)
+	}
+
+	// 第五步：commit 到主 registry
 	for _, id := range order {
 		a.plugins[id] = temp[id]
 	}

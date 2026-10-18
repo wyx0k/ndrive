@@ -71,6 +71,22 @@ func (a *ToolsAPI) Ws() Context { return a.ws }
 // Spec 4 Register 后会调用此方法；Spec 3 时为占位。
 func (a *ToolsAPI) Plugins() map[PluginID]Plugin { return a.plugins }
 
+// StopAllPlugins 对所有已注册的 StatefulPlugin 调 StopPlugin。
+// 由 Workspace.Close 调用；单个 plugin 的错误会被收集但不阻止其余 plugin 停止。
+func (a *ToolsAPI) StopAllPlugins() error {
+	var errs []error
+	for _, p := range a.plugins {
+		sp, ok := p.(StatefulPlugin)
+		if !ok {
+			continue
+		}
+		if err := sp.StopPlugin(); err != nil {
+			errs = append(errs, fmt.Errorf("tools: plugin %s StopPlugin: %w", p.ID(), err))
+		}
+	}
+	return errors.Join(errs...)
+}
+
 // Context 是 tools 包对工作区所需的最小接口。
 // 由 ndrive.Workspace 实现；tools 不反向 import ndrive（避免循环）。
 // plugin.Call 通过 ws 拿 bus / checker / ToolsAPI 引用。
@@ -101,6 +117,41 @@ type Plugin interface {
 	// Call 实际执行逻辑。
 	// ctx 是调用方 context；ws 是 workspace context；args 由 LLM/UI 构造。
 	Call(ctx context.Context, ws Context, args any) (any, error)
+}
+
+// StatefulPlugin 是可选接口，供有内部状态/后台资源的 plugin（如文件系统监听、
+// 长连接）实现，获得启停生命周期钩子。
+//
+// Register(plugin, cfg) 成功校验后会 type-assert 并自动调 StartPlugin(ws, cfg)，
+// cfg 就是调用 Register 时传入的初始配置（不需要初始配置传 nil）；
+// Workspace.Close（经 ToolsAPI.StopAllPlugins）会对所有已注册的 StatefulPlugin
+// 调 StopPlugin。StartPlugin 拿到的 Context 可长期持有，用于在后台
+// goroutine 里调 ws.Bus().Publish 主动发事件。
+type StatefulPlugin interface {
+	Plugin
+
+	// StartPlugin 在 plugin 注册成功后立即调用一次，cfg 是注册时传入的初始配置。
+	// 典型实现：按 cfg 建立文件系统监听 / 打开长连接，并保存 ws 供后台 goroutine 使用。
+	// 返回 error 时 Register 整体失败（registry 不保留该 plugin）。
+	StartPlugin(ws Context, cfg any) error
+
+	// StopPlugin 在 workspace 关闭时调用一次，用于释放
+	// StartPlugin 建立的资源（移除文件监听、关闭连接、停止 goroutine）。
+	StopPlugin() error
+}
+
+// ReloadablePlugin 是可选接口，职责仅限运行中热更新配置：只会被
+// ToolsAPI.UpdatePluginConfig 调用，和 Register / StartPlugin 的初始配置流程
+// 无关（StartPlugin 的 cfg 参数是独立输入，框架不会用它来调 UpdateConfig）。
+// 若 plugin 想让初始配置和热更新复用同一套校验/生效逻辑，可在 StartPlugin
+// 内部自行调用自己的 UpdateConfig；这是 plugin 的实现选择，不是接口约定。
+type ReloadablePlugin interface {
+	Plugin
+
+	// UpdateConfig 在 plugin 运行期间更新配置，由 ToolsAPI.UpdatePluginConfig 触发。
+	// cfg 的具体结构由 plugin 自己定义；plugin 必须自行做类型断言和校验，
+	// 无效配置应返回 error 且不生效（保留更新前的状态）。
+	UpdateConfig(cfg any) error
 }
 
 // SimplePluginDef 是声明式描述 plugin 的 helper struct。

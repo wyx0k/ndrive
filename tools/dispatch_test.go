@@ -20,9 +20,9 @@ type stubContext struct {
 	api     *tools.ToolsAPI
 }
 
-func (s *stubContext) Bus() bus.Bus                       { return s.bus }
-func (s *stubContext) Checker() permission.Checker        { return s.checker }
-func (s *stubContext) API() *tools.ToolsAPI               { return s.api }
+func (s *stubContext) Bus() bus.Bus                { return s.bus }
+func (s *stubContext) Checker() permission.Checker { return s.checker }
+func (s *stubContext) API() *tools.ToolsAPI        { return s.api }
 
 // stubChecker 实现 permission.Checker，按字段返错。
 type stubChecker struct {
@@ -57,7 +57,7 @@ func TestCallPluginNotFound(t *testing.T) {
 func TestCallSuccess(t *testing.T) {
 	b := bus.New()
 	api := tools.NewToolsAPI(&stubContext{bus: b})
-	if err := api.Register(&stubPlugin{id: "util.echo"}); err != nil {
+	if err := api.Register(&stubPlugin{id: "util.echo"}, nil); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 	v, err := api.Call(context.Background(), "util.echo", "in")
@@ -72,7 +72,7 @@ func TestCallSuccess(t *testing.T) {
 func TestCallPublishEvents(t *testing.T) {
 	b := bus.New()
 	api := tools.NewToolsAPI(&stubContext{bus: b})
-	if err := api.Register(&stubPlugin{id: "util.echo"}); err != nil {
+	if err := api.Register(&stubPlugin{id: "util.echo"}, nil); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 
@@ -117,7 +117,7 @@ func TestCallPublishErrorEvent(t *testing.T) {
 			return nil, want
 		},
 	}
-	if err := api.Register(errDef); err != nil {
+	if err := api.Register(errDef, nil); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 
@@ -143,7 +143,7 @@ func TestCallPublishErrorEvent(t *testing.T) {
 func TestCallReadPlugin(t *testing.T) {
 	checker := &stubChecker{}
 	api := tools.NewToolsAPI(&stubContext{bus: bus.New(), checker: checker})
-	if err := api.Register(&stubPlugin{id: "store.userdb.read", read: true}); err != nil {
+	if err := api.Register(&stubPlugin{id: "store.userdb.read", read: true}, nil); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 	if _, err := api.Call(context.Background(), "store.userdb.read", nil); err != nil {
@@ -161,7 +161,7 @@ func TestCallReadPlugin(t *testing.T) {
 func TestCallWritePlugin(t *testing.T) {
 	checker := &stubChecker{}
 	api := tools.NewToolsAPI(&stubContext{bus: bus.New(), checker: checker})
-	if err := api.Register(&stubPlugin{id: "user.draft.send", read: false}); err != nil {
+	if err := api.Register(&stubPlugin{id: "user.draft.send", read: false}, nil); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 	if _, err := api.Call(context.Background(), "user.draft.send", nil); err != nil {
@@ -180,7 +180,7 @@ func TestCallPermissionDenied(t *testing.T) {
 	b := bus.New()
 	checker := &stubChecker{writeErr: permission.ErrPermissionDenied}
 	api := tools.NewToolsAPI(&stubContext{bus: b, checker: checker})
-	if err := api.Register(&stubPlugin{id: "user.draft.send"}); err != nil {
+	if err := api.Register(&stubPlugin{id: "user.draft.send"}, nil); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 
@@ -202,7 +202,7 @@ func TestCallPermissionDenied(t *testing.T) {
 // TestCallNoChecker 不报错（permission 门控跳过）。
 func TestCallNoChecker(t *testing.T) {
 	api := tools.NewToolsAPI(&stubContext{bus: bus.New(), checker: nil})
-	if err := api.Register(&stubPlugin{id: "util.echo"}); err != nil {
+	if err := api.Register(&stubPlugin{id: "util.echo"}, nil); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 	if _, err := api.Call(context.Background(), "util.echo", nil); err != nil {
@@ -213,7 +213,7 @@ func TestCallNoChecker(t *testing.T) {
 // TestCallNoContext 整个 ws 为 nil：不发事件，但 plugin 仍能跑。
 func TestCallNoContext(t *testing.T) {
 	api := tools.NewToolsAPI(nil)
-	if err := api.Register(&stubPlugin{id: "util.echo"}); err != nil {
+	if err := api.Register(&stubPlugin{id: "util.echo"}, nil); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 	if _, err := api.Call(context.Background(), "util.echo", nil); err != nil {
@@ -235,7 +235,7 @@ func TestCallPluginReceivesContext(t *testing.T) {
 			receivedWS = ws
 			return nil, nil
 		},
-	}); err != nil {
+	}, nil); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 	if _, err := api.Call(context.Background(), "x.y", nil); err != nil {
@@ -246,6 +246,88 @@ func TestCallPluginReceivesContext(t *testing.T) {
 	}
 	if receivedWS.API() != api {
 		t.Error("plugin's ws.API() should equal the ToolsAPI")
+	}
+}
+
+// --- UpdatePluginConfig ---
+
+// configurableStub 是测试用的 ReloadablePlugin，记录最后一次配置并可配置更新失败。
+type configurableStub struct {
+	stubPlugin
+	cfg         any
+	updateErr   error
+	updateCalls int
+}
+
+func (c *configurableStub) UpdateConfig(cfg any) error {
+	c.updateCalls++
+	if c.updateErr != nil {
+		return c.updateErr
+	}
+	c.cfg = cfg
+	return nil
+}
+
+func TestUpdatePluginConfigSuccess(t *testing.T) {
+	b := bus.New()
+	api := tools.NewToolsAPI(&stubContext{bus: b})
+	cp := &configurableStub{stubPlugin: stubPlugin{id: "fs.watch"}}
+	if err := api.Register(cp, nil); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	var got tools.CallEvent
+	_, unsub := b.Subscribe("plugin.fs.watch.config_updated", func(p any) {
+		got = p.(tools.CallEvent)
+	})
+	defer unsub()
+
+	newCfg := map[string]any{"path": "/data"}
+	if err := api.UpdatePluginConfig("fs.watch", newCfg); err != nil {
+		t.Fatalf("UpdatePluginConfig: %v", err)
+	}
+	if cp.updateCalls != 1 {
+		t.Errorf("want UpdateConfig called once, got %d", cp.updateCalls)
+	}
+	if got.Op != "config_updated" || got.PluginID != "fs.watch" {
+		t.Errorf("event: %+v", got)
+	}
+}
+
+func TestUpdatePluginConfigNotFound(t *testing.T) {
+	api := tools.NewToolsAPI(&stubContext{bus: bus.New()})
+	err := api.UpdatePluginConfig("missing.x", nil)
+	if !errors.Is(err, tools.ErrPluginNotFound) {
+		t.Errorf("want ErrPluginNotFound, got %v", err)
+	}
+}
+
+func TestUpdatePluginConfigNotConfigurable(t *testing.T) {
+	api := tools.NewToolsAPI(&stubContext{bus: bus.New()})
+	_ = api.Register(&stubPlugin{id: "util.echo"}, nil)
+	err := api.UpdatePluginConfig("util.echo", nil)
+	if err == nil {
+		t.Fatal("want error for non-configurable plugin")
+	}
+}
+
+func TestUpdatePluginConfigFailureNoEvent(t *testing.T) {
+	b := bus.New()
+	api := tools.NewToolsAPI(&stubContext{bus: b})
+	cp := &configurableStub{stubPlugin: stubPlugin{id: "fs.watch"}, updateErr: errors.New("boom")}
+	_ = api.Register(cp, nil)
+
+	fired := false
+	_, unsub := b.Subscribe("plugin.fs.watch.config_updated", func(any) {
+		fired = true
+	})
+	defer unsub()
+
+	if err := api.UpdatePluginConfig("fs.watch", "bad"); err == nil {
+		t.Fatal("want error")
+	}
+	if fired {
+		t.Error("config_updated event should not fire on failed update")
 	}
 }
 
@@ -272,7 +354,7 @@ func TestToolsSorted(t *testing.T) {
 
 func TestToolsSnapshot(t *testing.T) {
 	api := tools.NewToolsAPI(nil)
-	_ = api.Register(&stubPlugin{id: "util.echo"})
+	_ = api.Register(&stubPlugin{id: "util.echo"}, nil)
 	ts := api.Tools()
 	if ts[0].Description != "util.echo desc" {
 		t.Errorf("Description: %q", ts[0].Description)
@@ -305,7 +387,7 @@ func TestFuncsBound(t *testing.T) {
 	checker := &stubChecker{}
 	ctx := &stubContext{bus: b, checker: checker}
 	api := tools.NewToolsAPI(ctx)
-	_ = api.Register(&stubPlugin{id: "util.echo", read: true})
+	_ = api.Register(&stubPlugin{id: "util.echo", read: true}, nil)
 
 	fs := api.Funcs()
 	if len(fs) != 1 {

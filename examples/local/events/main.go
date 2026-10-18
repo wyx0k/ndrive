@@ -73,7 +73,7 @@ func main() {
 			ws.Bus().Publish("greet.sent", map[string]any{"name": name})
 			return msg, nil
 		},
-	}); err != nil {
+	}, nil); err != nil {
 		panic(err)
 	}
 

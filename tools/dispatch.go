@@ -67,6 +67,26 @@ func (a *ToolsAPI) Call(ctx context.Context, id PluginID, args any) (any, error)
 	return result, nil
 }
 
+// UpdatePluginConfig 运行中更新一个 plugin 的配置。
+// plugin 必须实现 ReloadablePlugin，否则返 error。
+// 更新成功后发 `plugin.<id>.config_updated` 事件（payload: CallEvent{Args: cfg}）；
+// 更新失败不发事件。
+func (a *ToolsAPI) UpdatePluginConfig(id PluginID, cfg any) error {
+	p, ok := a.plugins[id]
+	if !ok {
+		return fmt.Errorf("%w: %s", ErrPluginNotFound, id)
+	}
+	cp, ok := p.(ReloadablePlugin)
+	if !ok {
+		return fmt.Errorf("tools: plugin %s does not implement ReloadablePlugin", id)
+	}
+	if err := cp.UpdateConfig(cfg); err != nil {
+		return err
+	}
+	a.publishEvent(id, "config_updated", cfg, nil, nil)
+	return nil
+}
+
 // Tools 返 LLM 视角的 plugin 列表（按 id 字典序）。
 // 字段是只读快照；不能用于实际调用。
 func (a *ToolsAPI) Tools() []Tool {

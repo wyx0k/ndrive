@@ -29,7 +29,7 @@ func TestEchoMetadata(t *testing.T) {
 
 func TestEchoBehavior(t *testing.T) {
 	api := tools.NewToolsAPI(&busBusContext{bus: bus.New()})
-	if err := api.Register(builtin.Echo()); err != nil {
+	if err := api.Register(builtin.Echo(), nil); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 
@@ -65,6 +65,6 @@ type busBusContext struct {
 	bus bus.Bus
 }
 
-func (b *busBusContext) Bus() bus.Bus                  { return b.bus }
-func (b *busBusContext) Checker() permission.Checker   { return nil }
-func (b *busBusContext) API() *tools.ToolsAPI          { return nil }
+func (b *busBusContext) Bus() bus.Bus                { return b.bus }
+func (b *busBusContext) Checker() permission.Checker { return nil }
+func (b *busBusContext) API() *tools.ToolsAPI        { return nil }

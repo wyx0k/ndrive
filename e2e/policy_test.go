@@ -130,7 +130,7 @@ func TestPolicyEndToEnd(t *testing.T) {
 		Fn_: func(_ context.Context, _ tools.Context, args any) (any, error) {
 			return args, nil
 		},
-	}); err != nil {
+	}, nil); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 

@@ -3,6 +3,7 @@ package ndrive
 
 import (
 	"context"
+	"errors"
 
 	"github.com/wyx0k/ndrive/bus"
 	"github.com/wyx0k/ndrive/meta"
@@ -45,17 +46,26 @@ func (w *Workspace) Context(ctx context.Context) context.Context {
 }
 
 // Register 是 ws.API().Register 的便捷包装。
-func (w *Workspace) Register(p tools.Plugin) error {
-	return w.api.Register(p)
+// cfg 是初始配置，供 plugin 实现 StatefulPlugin 时在 StartPlugin 中使用；不需要传 nil。
+func (w *Workspace) Register(p tools.Plugin, cfg any) error {
+	return w.api.Register(p, cfg)
 }
 
-// Close 关闭 meta store。
+// Close 停止所有有状态 plugin，然后关闭 meta store。
 // 注：id 工厂无状态，不需关闭；bus 无 Close。
 func (w *Workspace) Close() error {
-	if w.store != nil {
-		return w.store.Close()
+	var errs []error
+	if w.api != nil {
+		if err := w.api.StopAllPlugins(); err != nil {
+			errs = append(errs, err)
+		}
 	}
-	return nil
+	if w.store != nil {
+		if err := w.store.Close(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // --- ctx keys ---

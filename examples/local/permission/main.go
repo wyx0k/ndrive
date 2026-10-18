@@ -38,11 +38,11 @@ func main() {
 	must(ws.Register(tools.SimplePluginDef{
 		ID_: "util.echo", Description_: "echo", Read_: true,
 		Fn_: func(_ context.Context, _ tools.Context, args any) (any, error) { return args, nil },
-	}))
+	}, nil))
 	must(ws.Register(tools.SimplePluginDef{
 		ID_: "func.write", Description_: "write op", Read_: false,
 		Fn_: func(_ context.Context, _ tools.Context, args any) (any, error) { return args, nil },
-	}))
+	}, nil))
 
 	// 1. 4 档 mode 对读写操作的放行/拒绝行为。
 	demo := func(mode permission.Mode) {
