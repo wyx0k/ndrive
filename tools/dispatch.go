@@ -32,7 +32,9 @@ type CallEvent struct {
 // Call 触发一个 plugin。
 // 失败可能来源：plugin 未注册 / permission 拒绝 / plugin 自身返错。
 func (a *ToolsAPI) Call(ctx context.Context, id PluginID, args any) (any, error) {
+	a.mu.RLock()
 	p, ok := a.plugins[id]
+	a.mu.RUnlock()
 	if !ok {
 		return nil, fmt.Errorf("%w: %s", ErrPluginNotFound, id)
 	}
@@ -72,7 +74,9 @@ func (a *ToolsAPI) Call(ctx context.Context, id PluginID, args any) (any, error)
 // 更新成功后发 `plugin.<id>.config_updated` 事件（payload: CallEvent{Args: cfg}）；
 // 更新失败不发事件。
 func (a *ToolsAPI) UpdatePluginConfig(id PluginID, cfg any) error {
+	a.mu.RLock()
 	p, ok := a.plugins[id]
+	a.mu.RUnlock()
 	if !ok {
 		return fmt.Errorf("%w: %s", ErrPluginNotFound, id)
 	}
@@ -90,6 +94,8 @@ func (a *ToolsAPI) UpdatePluginConfig(id PluginID, cfg any) error {
 // Tools 返 LLM 视角的 plugin 列表（按 id 字典序）。
 // 字段是只读快照；不能用于实际调用。
 func (a *ToolsAPI) Tools() []Tool {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
 	ids := make([]PluginID, 0, len(a.plugins))
 	for id := range a.plugins {
 		ids = append(ids, id)
@@ -110,22 +116,23 @@ func (a *ToolsAPI) Tools() []Tool {
 // Funcs 返 UI 视角的 plugin 列表（按 id 字典序）。
 // 每个 Func.Call 已 bind 到当前 api，可直接调用（permission 门控仍走 api.Call）。
 func (a *ToolsAPI) Funcs() []Func {
+	a.mu.RLock()
 	ids := make([]PluginID, 0, len(a.plugins))
 	for id := range a.plugins {
 		ids = append(ids, id)
 	}
+	a.mu.RUnlock()
 	sort.Strings(ids)
 	out := make([]Func, 0, len(ids))
 	for _, id := range ids {
 		// capture per-iteration
-		id, p := id, a.plugins[id]
+		id := id
 		out = append(out, Func{
 			ID: id,
 			Call: func(ctx context.Context, args any) (any, error) {
 				return a.Call(ctx, id, args)
 			},
 		})
-		_ = p // plugin 信息已在 closure 内通过 id 路由
 	}
 	return out
 }

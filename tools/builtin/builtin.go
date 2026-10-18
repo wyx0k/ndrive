@@ -1,7 +1,7 @@
 // Package builtin 提供 ndrive 的极简内置 plugin。
 //
 // v5 起步只提供 util.echo 一个示例：返回 args 原样。
-// 全部 opt-in：用户显式 `api.Register(builtin.Echo())` 才会注入；不自动注册。
+// 全部 opt-in：用户显式 `api.Register(builtin.Echo(), nil)` 才会注入；不自动注册。
 package builtin
 
 import (

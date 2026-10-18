@@ -311,6 +311,27 @@ func TestUpdatePluginConfigNotConfigurable(t *testing.T) {
 	}
 }
 
+// statefulOnlyStub 只实现 StatefulPlugin，不实现 ReloadablePlugin；
+// 用于验证 UpdatePluginConfig 对只有启停钩子、没有热更新能力的 plugin 正确拒绝。
+type statefulOnlyStub struct {
+	stubPlugin
+}
+
+func (s *statefulOnlyStub) StartPlugin(ws tools.Context, cfg any) error { return nil }
+func (s *statefulOnlyStub) StopPlugin() error                           { return nil }
+
+func TestUpdatePluginConfigStatefulOnlyNotReloadable(t *testing.T) {
+	api := tools.NewToolsAPI(&stubContext{bus: bus.New()})
+	sp := &statefulOnlyStub{stubPlugin: stubPlugin{id: "fs.watch"}}
+	if err := api.Register(sp, nil); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	err := api.UpdatePluginConfig("fs.watch", "cfg")
+	if err == nil {
+		t.Fatal("want error: StatefulPlugin alone does not satisfy ReloadablePlugin")
+	}
+}
+
 func TestUpdatePluginConfigFailureNoEvent(t *testing.T) {
 	b := bus.New()
 	api := tools.NewToolsAPI(&stubContext{bus: b})

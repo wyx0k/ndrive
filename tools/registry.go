@@ -51,6 +51,10 @@ func (a *ToolsAPI) Register(plugin Plugin, cfg any) error {
 	if err := ValidatePluginID(id); err != nil {
 		return fmt.Errorf("%w: %v", ErrPluginInvalid, err)
 	}
+
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
 	if _, exists := a.plugins[id]; exists {
 		return fmt.Errorf("%w: %s", ErrPluginDuplicate, id)
 	}
@@ -91,10 +95,16 @@ func (a *ToolsAPI) RegisterAll(plugins []Plugin) error {
 		if _, exists := temp[id]; exists {
 			return fmt.Errorf("%w: %s", ErrPluginDuplicate, id)
 		}
+		temp[id] = p
+	}
+
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	for id := range temp {
 		if _, exists := a.plugins[id]; exists {
 			return fmt.Errorf("%w: %s", ErrPluginDuplicate, id)
 		}
-		temp[id] = p
 	}
 
 	// 第二步：校验所有依赖（依赖要么在 temp 内，要么已注册）
@@ -145,6 +155,8 @@ func (a *ToolsAPI) RegisterAll(plugins []Plugin) error {
 // 已注册的 plugin 必须无环（RegisterAll 在 commit 时已保证；直接 Register 多个时也可能引入环——
 // Resolve 仍要兜底检测）。
 func (a *ToolsAPI) Resolve() ([]PluginID, error) {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
 	if len(a.plugins) == 0 {
 		return nil, nil
 	}

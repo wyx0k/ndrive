@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 
 	"github.com/wyx0k/ndrive/bus"
 	"github.com/wyx0k/ndrive/permission"
@@ -50,6 +51,9 @@ func ValidatePluginID(id PluginID) error {
 // 本文件先定义类型 + 构造器 + 内部状态，让 Context.API() 的引用能解析。
 type ToolsAPI struct {
 	ws Context
+	// mu 保护 plugins map；Register / RegisterAll / Call / UpdatePluginConfig /
+	// StopAllPlugins / Tools / Funcs / Resolve / Plugins 并发调用时都要拿锁。
+	mu sync.RWMutex
 	// 已注册 plugin；具体字段在 Spec 4 实现 Register 时补全
 	plugins map[PluginID]Plugin
 }
@@ -67,15 +71,30 @@ func NewToolsAPI(ws Context) *ToolsAPI {
 // Spec 4 内部实现会用，外部一般不直接调。
 func (a *ToolsAPI) Ws() Context { return a.ws }
 
-// Plugins 返回当前已注册的 plugin 列表（只读快照）。
+// Plugins 返回当前已注册 plugin 的只读快照（拷贝，非内部 map 引用）。
 // Spec 4 Register 后会调用此方法；Spec 3 时为占位。
-func (a *ToolsAPI) Plugins() map[PluginID]Plugin { return a.plugins }
+func (a *ToolsAPI) Plugins() map[PluginID]Plugin {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	out := make(map[PluginID]Plugin, len(a.plugins))
+	for id, p := range a.plugins {
+		out[id] = p
+	}
+	return out
+}
 
 // StopAllPlugins 对所有已注册的 StatefulPlugin 调 StopPlugin。
 // 由 Workspace.Close 调用；单个 plugin 的错误会被收集但不阻止其余 plugin 停止。
 func (a *ToolsAPI) StopAllPlugins() error {
-	var errs []error
+	a.mu.RLock()
+	plugins := make([]Plugin, 0, len(a.plugins))
 	for _, p := range a.plugins {
+		plugins = append(plugins, p)
+	}
+	a.mu.RUnlock()
+
+	var errs []error
+	for _, p := range plugins {
 		sp, ok := p.(StatefulPlugin)
 		if !ok {
 			continue

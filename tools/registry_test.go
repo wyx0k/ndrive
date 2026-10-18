@@ -392,10 +392,11 @@ func TestRegisterNilConfigStillRegisters(t *testing.T) {
 
 // --- StatefulPlugin ---
 
-// statefulStub 是测试用的有状态 plugin，记录启停调用次数，可配置启动失败。
+// statefulStub 是测试用的有状态 plugin，记录启停调用次数，可配置启停失败。
 type statefulStub struct {
 	stubPlugin
 	startErr   error
+	stopErr    error
 	startCalls int
 	stopCalls  int
 }
@@ -407,7 +408,7 @@ func (s *statefulStub) StartPlugin(ws tools.Context, cfg any) error {
 
 func (s *statefulStub) StopPlugin() error {
 	s.stopCalls++
-	return nil
+	return s.stopErr
 }
 
 func TestRegisterStatefulPluginStarts(t *testing.T) {
@@ -445,6 +446,121 @@ func TestStopAllPlugins(t *testing.T) {
 	}
 	if sp1.stopCalls != 1 || sp2.stopCalls != 1 {
 		t.Errorf("want both stopped once, got sp1=%d sp2=%d", sp1.stopCalls, sp2.stopCalls)
+	}
+}
+
+// TestRegisterStatefulPluginDuplicateSkipsStart 验证重名校验失败时
+// StartPlugin 完全不会被触发（校验顺序：id/重名/依赖都在 StartPlugin 之前）。
+func TestRegisterStatefulPluginDuplicateSkipsStart(t *testing.T) {
+	api := newAPI()
+	_ = api.Register(&stubPlugin{id: "fs.watch"}, nil)
+
+	sp := &statefulStub{stubPlugin: stubPlugin{id: "fs.watch"}}
+	if err := api.Register(sp, nil); err == nil {
+		t.Fatal("want duplicate error")
+	}
+	if sp.startCalls != 0 {
+		t.Errorf("StartPlugin should not be called on duplicate-id failure, got %d calls", sp.startCalls)
+	}
+}
+
+// TestRegisterStatefulPluginMissingDepSkipsStart 验证依赖缺失校验失败时
+// StartPlugin 完全不会被触发。
+func TestRegisterStatefulPluginMissingDepSkipsStart(t *testing.T) {
+	api := newAPI()
+	sp := &statefulStub{stubPlugin: stubPlugin{id: "fs.watch", dependsOn: []tools.PluginID{"missing.thing"}}}
+	if err := api.Register(sp, nil); err == nil {
+		t.Fatal("want missing dep error")
+	}
+	if sp.startCalls != 0 {
+		t.Errorf("StartPlugin should not be called on missing-dep failure, got %d calls", sp.startCalls)
+	}
+}
+
+func TestStopAllPluginsPartialFailureStillStopsRest(t *testing.T) {
+	// 一个 plugin StopPlugin 失败不应阻止其余 plugin 被尝试停止；
+	// 两个失败都应被 errors.Join 收集。
+	api := newAPI()
+	ok := &statefulStub{stubPlugin: stubPlugin{id: "fs.watch"}}
+	bad1 := &statefulStub{stubPlugin: stubPlugin{id: "net.conn"}, stopErr: errors.New("boom1")}
+	bad2 := &statefulStub{stubPlugin: stubPlugin{id: "net.other"}, stopErr: errors.New("boom2")}
+	_ = api.Register(ok, nil)
+	_ = api.Register(bad1, nil)
+	_ = api.Register(bad2, nil)
+
+	err := api.StopAllPlugins()
+	if err == nil {
+		t.Fatal("want joined error")
+	}
+	if ok.stopCalls != 1 || bad1.stopCalls != 1 || bad2.stopCalls != 1 {
+		t.Errorf("all plugins should be stopped once regardless of failures, got ok=%d bad1=%d bad2=%d",
+			ok.stopCalls, bad1.stopCalls, bad2.stopCalls)
+	}
+	if !strings.Contains(err.Error(), "boom1") || !strings.Contains(err.Error(), "boom2") {
+		t.Errorf("joined error should mention both failures, got %q", err.Error())
+	}
+}
+
+// --- StatefulPlugin + ReloadablePlugin 组合 ---
+
+// statefulReloadableStub 同时实现 StatefulPlugin 和 ReloadablePlugin，
+// 验证两者互不干扰：UpdateConfig 只在运行期由 UpdatePluginConfig 触发，
+// 不会被 StartPlugin/StopPlugin 间接调用。
+type statefulReloadableStub struct {
+	stubPlugin
+	startCalls  int
+	stopCalls   int
+	updateCalls int
+	cfg         any
+}
+
+func (s *statefulReloadableStub) StartPlugin(ws tools.Context, cfg any) error {
+	s.startCalls++
+	return nil
+}
+
+func (s *statefulReloadableStub) StopPlugin() error {
+	s.stopCalls++
+	return nil
+}
+
+func (s *statefulReloadableStub) UpdateConfig(cfg any) error {
+	s.updateCalls++
+	s.cfg = cfg
+	return nil
+}
+
+func TestStatefulAndReloadablePluginIndependent(t *testing.T) {
+	api := newAPI()
+	sp := &statefulReloadableStub{stubPlugin: stubPlugin{id: "fs.watch"}}
+	initialCfg := map[string]any{"path": "/initial"}
+	if err := api.Register(sp, initialCfg); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	if sp.startCalls != 1 {
+		t.Errorf("want StartPlugin called once, got %d", sp.startCalls)
+	}
+	if sp.updateCalls != 0 {
+		t.Errorf("UpdateConfig should not be called by Register/StartPlugin, got %d calls", sp.updateCalls)
+	}
+
+	newCfg := map[string]any{"path": "/updated"}
+	if err := api.UpdatePluginConfig("fs.watch", newCfg); err != nil {
+		t.Fatalf("UpdatePluginConfig: %v", err)
+	}
+	if sp.updateCalls != 1 {
+		t.Errorf("want UpdateConfig called once, got %d", sp.updateCalls)
+	}
+	got, ok := sp.cfg.(map[string]any)
+	if !ok || got["path"] != "/updated" {
+		t.Errorf("UpdateConfig did not receive new cfg, got %v", sp.cfg)
+	}
+
+	if err := api.StopAllPlugins(); err != nil {
+		t.Fatalf("StopAllPlugins: %v", err)
+	}
+	if sp.stopCalls != 1 {
+		t.Errorf("want StopPlugin called once, got %d", sp.stopCalls)
 	}
 }
 
