@@ -1,0 +1,94 @@
+// Package sqlite 实现 meta.Store。
+package sqlite
+
+import (
+	"context"
+	"errors"
+
+	"github.com/wyx0k/ndrive/meta"
+
+	"gorm.io/driver/sqlite"
+	"gorm.io/gorm"
+	"gorm.io/gorm/logger"
+)
+
+// Config sqlite 配置。
+type Config struct {
+	Path        string
+	MaxOpenConn int
+}
+
+type record struct {
+	Key   string `gorm:"primarykey"`
+	Value []byte
+}
+
+type store struct {
+	db *gorm.DB
+}
+
+// New 创建 sqlite store。
+func New(ctx context.Context, cfg Config) (meta.Store, error) {
+	db, err := gorm.Open(sqlite.Open(cfg.Path), &gorm.Config{
+		Logger: logger.Default.LogMode(logger.Silent),
+	})
+	if err != nil {
+		return nil, err
+	}
+	if cfg.MaxOpenConn > 0 {
+		sqlDB, err := db.DB()
+		if err != nil {
+			return nil, err
+		}
+		sqlDB.SetMaxOpenConns(cfg.MaxOpenConn)
+	}
+	if err := db.WithContext(ctx).AutoMigrate(&record{}); err != nil {
+		return nil, err
+	}
+	return &store{db: db}, nil
+}
+
+func (s *store) Get(ctx context.Context, key string) (meta.Record, error) {
+	var r record
+	err := s.db.WithContext(ctx).Where("key = ?", key).First(&r).Error
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return meta.Record{Key: key}, nil
+		}
+		return meta.Record{}, err
+	}
+	return meta.Record{Key: r.Key, Value: r.Value}, nil
+}
+
+func (s *store) Put(ctx context.Context, key string, value []byte) error {
+	r := record{Key: key, Value: value}
+	return s.db.WithContext(ctx).Save(&r).Error
+}
+
+func (s *store) Delete(ctx context.Context, key string) error {
+	return s.db.WithContext(ctx).Where("key = ?", key).Delete(&record{}).Error
+}
+
+func (s *store) List(ctx context.Context, prefix string) ([]meta.Record, error) {
+	var rs []record
+	q := s.db.WithContext(ctx)
+	if prefix != "" {
+		q = q.Where("key LIKE ?", prefix+"%")
+	}
+	if err := q.Find(&rs).Error; err != nil {
+		return nil, err
+	}
+	out := make([]meta.Record, 0, len(rs))
+	for _, r := range rs {
+		out = append(out, meta.Record{Key: r.Key, Value: r.Value})
+	}
+	return out, nil
+}
+
+func (s *store) Close() error {
+	sqlDB, err := s.db.DB()
+	if err != nil {
+		return err
+	}
+	return sqlDB.Close()
+}

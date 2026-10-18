@@ -1,9 +1,31 @@
-package ntd
+// Package ndrive 是 v5 容器层根包。
+//
+// 提供：
+//   - Workspace 工作区句柄
+//   - OpenWorkspace 创建/打开工作区
+//   - WorkspaceConfig / MetaConfig / SqliteConfig / MysqlConfig
+//
+// v5 哲学：根包不是薄壳，是真实实现容器层。3 个子能力（bus / permission / tools）独立顶层包。
+package ndrive
 
-// MetaConfig meta 存储配置（SqliteConfig / MysqlConfig 二选一）
-type MetaConfig interface{ isMetaConfig() }
+// WorkspaceConfig 是 OpenWorkspace 的配置。
+type WorkspaceConfig struct {
+	// WorkerID snowflake worker id。
+	//   0 = 自动分配（进程内唯一，但不保证跨进程唯一）
+	//   非 0 = 严格检测；同 workerID 二次 Init 会失败
+	WorkerID int64
 
-// SqliteConfig 本地 SQLite
+	// Meta meta 存储配置（SqliteConfig / MysqlConfig 二选一）
+	Meta MetaConfig
+}
+
+// MetaConfig 是 meta 存储配置的抽象类型（SqliteConfig / MysqlConfig 二选一）。
+// 用 sealed interface 模式：只有本包内的类型能实现。
+type MetaConfig interface {
+	isMetaConfig()
+}
+
+// SqliteConfig 本地 SQLite 存储。
 type SqliteConfig struct {
 	Path        string
 	MaxOpenConn int
@@ -11,7 +33,7 @@ type SqliteConfig struct {
 
 func (SqliteConfig) isMetaConfig() {}
 
-// MysqlConfig 远端 MySQL
+// MysqlConfig 远端 MySQL 存储。
 type MysqlConfig struct {
 	Host         string
 	Port         int
@@ -23,53 +45,3 @@ type MysqlConfig struct {
 }
 
 func (MysqlConfig) isMetaConfig() {}
-
-// BackendConfig backend 存储配置基类型
-type BackendConfig interface{ IsBackendConfig() }
-
-// --- Backend 名称常量 ---
-
-const (
-	BackendLocalFile   = "local_file"
-	BackendLocalSQLite = "local_sqlite"
-	BackendLocalBadger = "local_badger"
-	BackendRemoteSQL   = "remote_sql"
-	BackendRemoteMongo = "remote_mongo"
-)
-
-// --- Backend Config 类型 ---
-
-// LocalFileConfig localfile backend 配置
-type LocalFileConfig struct {
-	RootDir string
-}
-
-func (LocalFileConfig) IsBackendConfig() {}
-
-// LocalSQLiteConfig localsqlite backend 配置
-type LocalSQLiteConfig struct {
-	DSN string
-}
-
-func (LocalSQLiteConfig) IsBackendConfig() {}
-
-// LocalBadgerConfig localbadger backend 配置
-type LocalBadgerConfig struct {
-	Dir string
-}
-
-func (LocalBadgerConfig) IsBackendConfig() {}
-
-// RemoteSQLConfig remotesql backend 配置
-type RemoteSQLConfig struct {
-	DSN string
-}
-
-func (RemoteSQLConfig) IsBackendConfig() {}
-
-// RemoteMongoConfig remotemongo backend 配置
-type RemoteMongoConfig struct {
-	URI string
-}
-
-func (RemoteMongoConfig) IsBackendConfig() {}

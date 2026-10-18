@@ -1,181 +1,81 @@
-package ntd
+// workspace.go：Workspace struct + 公共方法。
+package ndrive
 
 import (
 	"context"
-	"encoding/json"
-	"errors"
-	"fmt"
 
-	"github.com/wyx0k/ndrive/pkg/backend"
-	pkgbus "github.com/wyx0k/ndrive/pkg/bus"
-	pkgctx "github.com/wyx0k/ndrive/pkg/ctx"
-	pkgmeta "github.com/wyx0k/ndrive/pkg/meta"
-	"github.com/wyx0k/ndrive/pkg/policy"
+	"github.com/wyx0k/ndrive/bus"
+	"github.com/wyx0k/ndrive/meta"
+	"github.com/wyx0k/ndrive/permission"
+	"github.com/wyx0k/ndrive/tools"
 )
 
-var (
-	ErrWorkspaceNotFound = errors.New("workspace not found")
-	ErrOwnerMismatch     = errors.New("workspace owner_id mismatch")
-	ErrBizmodelNotFound  = errors.New("bizmodel not found")
-	ErrBizmodelExists    = errors.New("bizmodel exists")
-)
-
-const wsKindPrefix  = "workspace/"
-const bizKindPrefix = "bizmodel/"
-
-type wsMeta struct {
-	ID      string `json:"id"`
-	OwnerID string `json:"owner_id"`
-}
-
-type bizMetaRecord struct {
-	ID       string          `json:"id"`
-	WSID     string          `json:"ws_id"`
-	TypeName string          `json:"type_name"`
-	Config   json.RawMessage `json:"config"`
-}
-
-// Workspace 工作区句柄（唯一对外入口）
+// Workspace 工作区句柄（v5 容器层主类型）。
+// 实现 tools.Context 接口（让 ToolsAPI.Call 能注入到 plugin）。
 type Workspace struct {
 	id      string
-	ownerID string
-	store   pkgmeta.Store
-	bus     pkgbus.Bus
+	userID  string
+	store   meta.Store
+	bus     bus.Bus
+	api     *tools.ToolsAPI
+	checker permission.Checker
+	wsStore *meta.WorkspaceStore
+	perm    *meta.PermissionStore
 }
 
-func (w *Workspace) ID() string      { return w.id }
-func (w *Workspace) OwnerID() string { return w.ownerID }
+// ID 返 workspace 标识。
+func (w *Workspace) ID() string { return w.id }
 
-// Close 关闭 meta store 并从全局缓存中移除
-func (w *Workspace) Close() error {
-	wsMu.Lock()
-	delete(wsMap, w.id)
-	wsMu.Unlock()
-	return w.store.Close()
-}
+// UserID 返当前用户标识。
+func (w *Workspace) UserID() string { return w.userID }
 
-// Bus 返回 workspace 的事件总线，供下游 LLM pipeline / UI 层挂载
-func (w *Workspace) Bus() Bus { return &busAdapter{w.bus} }
+// Bus 返进程内事件总线。
+func (w *Workspace) Bus() bus.Bus { return w.bus }
 
-// Context 返回注入了 wsID 和 ownerID 的 ctx，用于后续 Call/Tree 操作
+// API 返 ToolsAPI（plugin 注册中心）。
+func (w *Workspace) API() *tools.ToolsAPI { return w.api }
+
+// Checker 返 permission 检查器。
+// 满足 tools.Context 接口（被 ToolsAPI 用于门控）。
+func (w *Workspace) Checker() permission.Checker { return w.checker }
+
+// Context 把 wsID + userID 注入到 ctx，供下游 plugin / handler 用。
 func (w *Workspace) Context(ctx context.Context) context.Context {
-	return pkgctx.WithOwner(pkgctx.WithWorkspace(ctx, w.id), w.ownerID)
+	return withWS(ctx, w.id, w.userID)
 }
 
-// SetPolicy 设置当前 owner 在此 workspace 的权限
-func (w *Workspace) SetPolicy(ctx context.Context, mode PolicyMode) error {
-	return policy.Set(ctx, w.store, policy.Binding{
-		WorkspaceID: w.id,
-		OwnerID:     w.ownerID,
-		Mode:        policy.Mode(mode),
-	})
+// Register 是 ws.API().Register 的便捷包装。
+func (w *Workspace) Register(p tools.Plugin) error {
+	return w.api.Register(p)
 }
 
-// GetPolicy 获取当前 owner 的权限
-func (w *Workspace) GetPolicy(ctx context.Context) (PolicyMode, error) {
-	m, err := policy.Get(ctx, w.store, w.id, w.ownerID)
-	return PolicyMode(m), err
-}
-
-// ListPolicies 列出 workspace 下所有 policy binding
-func (w *Workspace) ListPolicies(ctx context.Context) ([]policy.Binding, error) {
-	return policy.List(ctx, w.store, w.id)
-}
-
-// DeletePolicy 删除当前 owner 的 policy binding
-func (w *Workspace) DeletePolicy(ctx context.Context) error {
-	return policy.Delete(ctx, w.store, w.id, w.ownerID)
-}
-
-// CreateBizmodel 创建并持久化一个 bizmodel
-func (w *Workspace) CreateBizmodel(ctx context.Context, opts BizmodelOpts) (*Bizmodel, error) {
-	key := bizKindPrefix + w.id + "/" + opts.ID
-	existing, err := w.store.Get(ctx, key)
-	if err != nil {
-		return nil, err
+// Close 关闭 meta store。
+// 注：id 工厂无状态，不需关闭；bus 无 Close。
+func (w *Workspace) Close() error {
+	if w.store != nil {
+		return w.store.Close()
 	}
-	if existing.Value != nil {
-		return nil, fmt.Errorf("%w: %s", ErrBizmodelExists, opts.ID)
-	}
-	be, ok := backend.Get(opts.TypeName)
+	return nil
+}
+
+// --- ctx keys ---
+
+type wsCtxKey struct{}
+
+type wsCtxValue struct {
+	wsID   string
+	userID string
+}
+
+func withWS(ctx context.Context, wsID, userID string) context.Context {
+	return context.WithValue(ctx, wsCtxKey{}, wsCtxValue{wsID: wsID, userID: userID})
+}
+
+// FromContext 从 ctx 提取 (wsID, userID)；缺失时返空串。
+func FromContext(ctx context.Context) (wsID, userID string) {
+	v, ok := ctx.Value(wsCtxKey{}).(wsCtxValue)
 	if !ok {
-		return nil, fmt.Errorf("unknown backend type: %s", opts.TypeName)
+		return "", ""
 	}
-	resolvedCfg, err := resolveBackendConfig(opts.Config)
-	if err != nil {
-		return nil, err
-	}
-	t, err := be.NewTree(resolvedCfg)
-	if err != nil {
-		return nil, fmt.Errorf("backend init failed: %w", err)
-	}
-	cfgBytes, err := json.Marshal(resolvedCfg)
-	if err != nil {
-		return nil, err
-	}
-	rec := bizMetaRecord{ID: opts.ID, WSID: w.id, TypeName: opts.TypeName, Config: cfgBytes}
-	data, err := json.Marshal(rec)
-	if err != nil {
-		return nil, err
-	}
-	if err := w.store.Put(ctx, key, data); err != nil {
-		return nil, err
-	}
-	return newBizmodel(opts.ID, be, t, w.store, w.id, w.ownerID, w.bus, w), nil
-}
-
-// GetBizmodel 按 ID 获取已有 bizmodel
-func (w *Workspace) GetBizmodel(ctx context.Context, bizID string) (*Bizmodel, error) {
-	key := bizKindPrefix + w.id + "/" + bizID
-	rec, err := w.store.Get(ctx, key)
-	if err != nil {
-		return nil, err
-	}
-	if rec.Value == nil {
-		return nil, fmt.Errorf("%w: %s", ErrBizmodelNotFound, bizID)
-	}
-	return w.loadBizmodel(rec.Value)
-}
-
-// ListBizModels 列出 workspace 下所有 bizmodel
-func (w *Workspace) ListBizModels(ctx context.Context) ([]*Bizmodel, error) {
-	prefix := bizKindPrefix + w.id + "/"
-	recs, err := w.store.List(ctx, prefix)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]*Bizmodel, 0, len(recs))
-	for _, rec := range recs {
-		bm, err := w.loadBizmodel(rec.Value)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, bm)
-	}
-	return out, nil
-}
-
-// DeleteBizmodel 删除一个 bizmodel
-func (w *Workspace) DeleteBizmodel(ctx context.Context, bizID string) error {
-	return w.store.Delete(ctx, bizKindPrefix+w.id+"/"+bizID)
-}
-
-func (w *Workspace) loadBizmodel(data []byte) (*Bizmodel, error) {
-	var rec bizMetaRecord
-	if err := json.Unmarshal(data, &rec); err != nil {
-		return nil, err
-	}
-	be, ok := backend.Get(rec.TypeName)
-	if !ok {
-		return nil, fmt.Errorf("unknown backend type: %s", rec.TypeName)
-	}
-	cfg, err := be.ConfigFromJSON(rec.Config)
-	if err != nil {
-		return nil, fmt.Errorf("%s ConfigFromJSON: %w", rec.TypeName, err)
-	}
-	t, err := be.NewTree(cfg)
-	if err != nil {
-		return nil, err
-	}
-	return newBizmodel(rec.ID, be, t, w.store, w.id, w.ownerID, w.bus, w), nil
+	return v.wsID, v.userID
 }

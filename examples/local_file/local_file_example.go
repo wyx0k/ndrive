@@ -1,87 +1,116 @@
+// local_file_example.go：v5 自定义 localfile plugin 注册示例。
+//
+// v5 哲学：ndrive 不内置任何 backend；用户用 Plugin 接口自己写。
+// 这里写一个简单的 store.localfile.read / store.localfile.write plugin。
 package main
 
 import (
 	"context"
 	"fmt"
-	"log"
+	"os"
 
 	"github.com/wyx0k/ndrive"
+	"github.com/wyx0k/ndrive/permission"
+	"github.com/wyx0k/ndrive/tools"
+	"github.com/wyx0k/ndrive/tools/builtin"
 )
 
 func main() {
 	ctx := context.Background()
-
-	// 1. 打开 workspace（sqlite meta，localfile backend）
-	ws, err := ntd.OpenWorkspace(ctx, "ws-demo", "owner-alice", ntd.Config{
-		Meta: ntd.SqliteConfig{Path: "./demo.db"},
+	ws, err := ndrive.OpenWorkspace(ctx, "demo", "demo-user", ndrive.WorkspaceConfig{
+		WorkerID: 1,
+		Meta:     ndrive.SqliteConfig{Path: "/tmp/ndrive-demo.db"},
 	})
 	if err != nil {
-		log.Fatal("open workspace:", err)
+		panic(err)
 	}
 	defer ws.Close()
 
-	fmt.Println("workspace:", ws.ID(), "owner:", ws.OwnerID())
+	// opt-in: 注册 util.echo
+	if err := ws.Register(builtin.Echo()); err != nil {
+		panic(err)
+	}
 
-	// 2. 创建 localfile bizmodel
-	bm, err := ws.CreateBizmodel(ctx, ntd.BizmodelOpts{
-		ID:       "notes",
-		TypeName: ntd.BackendLocalFile,
-		Config:   ntd.LocalFileConfig{RootDir: "./notes-store"},
+	// 自定义 store.localfile.write
+	if err := ws.Register(tools.SimplePluginDef{
+		ID_:          "store.localfile.write",
+		Description_: "写入本地文件",
+		Schema_: map[string]any{
+			"type":     "object",
+			"required": []string{"path", "body"},
+			"properties": map[string]any{
+				"path": map[string]any{"type": "string"},
+				"body": map[string]any{"type": "string"},
+			},
+		},
+		Read_: false, // 写
+		Fn_: func(_ context.Context, ws tools.Context, args any) (any, error) {
+			a, ok := args.(map[string]any)
+			if !ok {
+				return nil, fmt.Errorf("expected map args, got %T", args)
+			}
+			path, _ := a["path"].(string)
+			body, _ := a["body"].(string)
+			if err := os.WriteFile(path, []byte(body), 0644); err != nil {
+				return nil, err
+			}
+			// 用 ws 的 bus 发事件
+			ws.Bus().Publish("file.written", map[string]any{"path": path})
+			return map[string]any{"ok": true, "path": path}, nil
+		},
+	}); err != nil {
+		panic(err)
+	}
+
+	// 自定义 store.localfile.read（依赖 write 不存在，所以单独注册）
+	if err := ws.Register(tools.SimplePluginDef{
+		ID_:          "store.localfile.read",
+		Description_: "读取本地文件",
+		Schema_: map[string]any{
+			"type":     "object",
+			"required": []string{"path"},
+			"properties": map[string]any{
+				"path": map[string]any{"type": "string"},
+			},
+		},
+		Read_: true, // 读
+		Fn_: func(_ context.Context, _ tools.Context, args any) (any, error) {
+			a, ok := args.(map[string]any)
+			if !ok {
+				return nil, fmt.Errorf("expected map args, got %T", args)
+			}
+			path, _ := a["path"].(string)
+			data, err := os.ReadFile(path)
+			if err != nil {
+				return nil, err
+			}
+			return map[string]any{"path": path, "body": string(data)}, nil
+		},
+	}); err != nil {
+		panic(err)
+	}
+
+	// 演示：把 ws 的 policy 设成 W（写放行）
+	if err := ws.SetPolicy(ctx, "demo-user", permission.W); err != nil {
+		panic(err)
+	}
+
+	// 调用 write
+	v, err := ws.API().Call(ctx, "store.localfile.write", map[string]any{
+		"path": "/tmp/ndrive-demo.txt",
+		"body": "hello v5",
 	})
 	if err != nil {
-		bm, err = ws.GetBizmodel(ctx, "notes")
-		if err != nil {
-			log.Fatal("get bizmodel:", err)
-		}
+		panic(err)
 	}
-	fmt.Println("bizmodel:", bm.ID(), "type:", bm.Type().Name)
+	fmt.Println("write result:", v)
 
-	// 3. 设置 policy = W
-	if err := ws.SetPolicy(ctx, ntd.W); err != nil {
-		log.Fatal("set policy:", err)
-	}
-	fmt.Println("policy set to W")
-
-	// 4. 注入 wsID/ownerID 到 ctx
-	ownerCtx := ws.Context(ctx)
-
-	// 5. 创建目录
-	if _, err := bm.Call(ownerCtx, "dir-mkdir", "/notes", nil); err != nil {
-		log.Println("mkdir /notes:", err)
-	} else {
-		fmt.Println("created dir /notes")
-	}
-
-	// 6. 写入带 frontmatter 的 markdown 文件
-	if _, err := bm.Call(ownerCtx, "file-fm-write", "/notes/hello.md", map[string]any{
-		"withfm": true,
-		"fm": map[string]any{
-			"title": "Hello ntd",
-			"tags":  []any{"demo", "github.com/wyx0k/ndrive"},
-		},
-		"body": "# Hello ntd\n\n这是一个演示文件。\n",
-	}); err != nil {
-		log.Fatal("file-fm-write:", err)
-	}
-	fmt.Println("wrote /notes/hello.md")
-
-	// 7. ListWithBrief
-	briefs, err := bm.Tree().ListWithBrief(ownerCtx, "/notes")
+	// 调用 read
+	v, err = ws.API().Call(ctx, "store.localfile.read", map[string]any{
+		"path": "/tmp/ndrive-demo.txt",
+	})
 	if err != nil {
-		log.Fatal("list:", err)
+		panic(err)
 	}
-	fmt.Println("\nbriefs:")
-	for _, b := range briefs {
-		fmt.Printf("  [%s] %s  title=%q  preview=%q\n", b.SubKind, b.Path, b.Title, b.Preview)
-	}
-
-	// 8. Search
-	results, err := bm.Tree().Search(ownerCtx, "*hello*")
-	if err != nil {
-		log.Fatal("search:", err)
-	}
-	fmt.Println("\nsearch *hello*:")
-	for _, b := range results {
-		fmt.Printf("  [%s] %s  title=%q\n", b.SubKind, b.Path, b.Title)
-	}
+	fmt.Println("read result:", v)
 }
