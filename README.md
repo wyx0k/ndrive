@@ -30,7 +30,7 @@ go get github.com/wyx0k/ndrive
 - **四档权限模型**：`RAsk`/`R`/`WAsk`/`W`，`WAsk`/`RAsk` 会通过 Bus 向外发起确认请求，适合需要人审的高风险操作
 - **事件总线**：每次 Call 自动广播 `start`/`done`/`error` 生命周期事件，插件内部也能发自定义事件，方便 LLM pipeline 和 UI 层挂载
 - **容器生命周期**：插件可选实现 `StatefulPlugin`（启动/停止）、`ReloadablePlugin`（热更新配置）、`ServicePlugin`（暴露内部服务对象）
-- **开箱即用的本地文件插件**：`plugins/localfs` 提供文件列举/读取/搜索/stat/写入/编辑 + 文件变更监听，可直接注册使用
+- **开箱即用的本地文件插件**：`plugins/localfs` 提供文件列举/读取/搜索/stat/写入/编辑/删除 + 文件变更监听，可直接注册使用
 
 ## 快速开始
 

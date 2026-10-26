@@ -412,7 +412,7 @@ type Func struct {
 
 **外部 import**：`github.com/wyx0k/ndrive/tools`
 
-**worked example**：`plugins/localfs` —— 一个真正的多 tool 容器，导出 `list`/`read`/`search`/`stat`/`write`/`write-markdown`/`edit`，`open`/`write-stream` 设为 `Internal_: true`（只给容器内部/其它 tool 复用，不直接暴露）；容器同时实现 `StatefulPlugin`（`StartPlugin` 启动文件监听、发布 `file.*` 事件；`StopPlugin` 关闭监听）和 `ServicePlugin`（`Service()` 返回底层 `*FS`，供 `builtin.FileService` 等 Go 代码直接消费）。`edit` 演示了乐观并发校验：调用方传入之前 `stat`/`list` 读到的 `modTime`，与文件当前修改时间不一致就拒绝写入（`ErrModTimeMismatch`），避免覆盖掉别处并发产生的修改。
+**worked example**：`plugins/localfs` —— 一个真正的多 tool 容器，导出 `list`/`read`/`search`/`stat`/`write`/`write-markdown`/`edit`/`delete`，`open`/`write-stream` 设为 `Internal_: true`（只给容器内部/其它 tool 复用，不直接暴露）；容器同时实现 `StatefulPlugin`（`StartPlugin` 启动文件监听、发布 `file.*` 事件；`StopPlugin` 关闭监听）和 `ServicePlugin`（`Service()` 返回底层 `*FS`，供 `builtin.FileService` 等 Go 代码直接消费）。`edit` 演示了乐观并发校验：调用方传入之前 `stat`/`list` 读到的 `modTime`，与文件当前修改时间不一致就拒绝写入（`ErrModTimeMismatch`），避免覆盖掉别处并发产生的修改。`delete` 演示了破坏性操作的两条硬约束：删目录必须显式 `recursive=true`（否则 `ErrIsDirectory`），删沙盒根目录本身一律拒绝（`ErrDeleteRoot`）。所有路径都过**两层沙盒校验**（`FS.resolve`）：词法校验（拒绝 `..` 越界）+ 链接校验（解开软链/junction 后真实路径仍须在 root 内）—— 只做词法校验时，root 里一个指向外部的链接就能把沙盒外的文件读出来。
 
 **walkthrough 决议记录**：
 - ✅ Forward ref：方案 c（`RegisterAll` 批量，按 DependsOn 排序）
@@ -852,7 +852,7 @@ ws.API().Call(userCtx, "store.localfile.write", map[string]any{
 
 **说明 v5 哲学**：v4 把"本地文件"作为内置能力；v5 让"本地文件"成为一个普通 plugin，引擎不关心 plugin 操作什么（文件 / 数据库 / HTTP / 内存都行）。
 
-**生产可用的版本**是 `plugins/localfs`：一个真正的多 tool 容器 `store.localfs`，挂了 `list`/`read`/`search`/`stat`（导出）+ `open`（`Internal_: true`，只给内部/其它 tool 用），并实现 `StatefulPlugin`（启动时开文件监听，发 `file.*` 事件；`StopPlugin` 时关闭）：
+**生产可用的版本**是 `plugins/localfs`：一个真正的多 tool 容器 `store.localfs`，挂了 `list`/`read`/`search`/`stat`/`write`/`write-markdown`/`edit`/`delete`（导出）+ `open`/`write-stream`（`Internal_: true`，只给内部/其它 tool 用），并实现 `StatefulPlugin`（启动时开文件监听，发 `file.*` 事件；`StopPlugin` 时关闭）：
 
 ```go
 fsPlugin, _ := localfs.NewPlugin("/data/notes")

@@ -72,4 +72,10 @@ type FileService interface {
 	// 一次，否则返回 error；expectedModTime 必须与文件当前 ModTime 一致，
 	// 否则返回 ErrModTimeMismatch（说明文件在读取之后被改过）。
 	Edit(ctx context.Context, path string, old, newText string, expectedModTime time.Time) (FileEntry, error)
+
+	// Delete 删除 path 指向的文件或目录。
+	// path 指向目录时必须显式传 recursive=true 才允许递归删除整棵子树，
+	// 否则实现方应拒绝（避免"删个文件"顺手删掉整棵目录树）。
+	// 删除存储根目录本身一律拒绝（根是沙盒边界，删掉后整个存储就没了）。
+	Delete(ctx context.Context, path string, recursive bool) error
 }

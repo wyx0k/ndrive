@@ -30,7 +30,7 @@ go get github.com/wyx0k/ndrive
 - **Four-level permission model**: `RAsk`/`R`/`WAsk`/`W` — `WAsk`/`RAsk` issue a confirmation request over the Bus, suitable for high-risk operations that need human review
 - **Event bus**: every Call automatically broadcasts `start`/`done`/`error` lifecycle events; plugins can also publish custom events, making it easy to hook into an LLM pipeline or a UI layer
 - **Container lifecycle**: plugins can optionally implement `StatefulPlugin` (start/stop), `ReloadablePlugin` (hot config reload), `ServicePlugin` (expose an internal service object)
-- **Ready-to-use local filesystem plugin**: `plugins/localfs` provides file listing/reading/searching/stat/writing/editing plus file-change watching, ready to register as-is
+- **Ready-to-use local filesystem plugin**: `plugins/localfs` provides file listing/reading/searching/stat/writing/editing/deleting plus file-change watching, ready to register as-is
 
 ## Quick Start
 

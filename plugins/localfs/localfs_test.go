@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -394,16 +395,149 @@ func TestEditRejectsNonUniqueOld(t *testing.T) {
 	}
 }
 
+// --- Delete ---
+
+func TestDeleteRemovesFile(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "a.txt"), "hello")
+
+	fs, err := localfs.New(dir)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := fs.Delete(context.Background(), "a.txt", false); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "a.txt")); !os.IsNotExist(err) {
+		t.Fatalf("file should be gone after Delete, stat err = %v", err)
+	}
+}
+
+func TestDeleteRejectsEscape(t *testing.T) {
+	dir := t.TempDir()
+	outside := filepath.Join(dir, "..", "outside.txt")
+	writeFile(t, outside, "keep me")
+
+	fs, err := localfs.New(dir)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := fs.Delete(context.Background(), "../outside.txt", false); !errors.Is(err, localfs.ErrOutsideRoot) {
+		t.Errorf("want ErrOutsideRoot, got %v", err)
+	}
+	if _, err := os.Stat(outside); err != nil {
+		t.Fatalf("outside file should still exist: %v", err)
+	}
+}
+
+func TestDeleteRejectsRoot(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "a.txt"), "hello")
+
+	fs, err := localfs.New(dir)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	for _, path := range []string{"", ".", "./"} {
+		if err := fs.Delete(context.Background(), path, true); !errors.Is(err, localfs.ErrDeleteRoot) {
+			t.Errorf("Delete(%q) want ErrDeleteRoot, got %v", path, err)
+		}
+	}
+	// root 里的内容必须还在
+	if _, err := os.Stat(filepath.Join(dir, "a.txt")); err != nil {
+		t.Fatalf("root content should still exist: %v", err)
+	}
+}
+
+// TestDeleteDirRequiresRecursive 验证删目录必须显式 recursive=true：
+// 不加 recursive 时目录（及其内容）保持原样。
+func TestDeleteDirRequiresRecursive(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "sub", "a.txt"), "hello")
+
+	fs, err := localfs.New(dir)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := fs.Delete(context.Background(), "sub", false); !errors.Is(err, localfs.ErrIsDirectory) {
+		t.Errorf("want ErrIsDirectory, got %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "sub", "a.txt")); err != nil {
+		t.Fatalf("dir content should be untouched: %v", err)
+	}
+}
+
+func TestDeleteDirRecursive(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "sub", "deep", "a.txt"), "hello")
+	writeFile(t, filepath.Join(dir, "keep.txt"), "keep")
+
+	fs, err := localfs.New(dir)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := fs.Delete(context.Background(), "sub", true); err != nil {
+		t.Fatalf("Delete recursive: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "sub")); !os.IsNotExist(err) {
+		t.Fatalf("dir should be gone, stat err = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "keep.txt")); err != nil {
+		t.Fatalf("sibling should survive: %v", err)
+	}
+}
+
+// TestDeleteMissingPath 验证删不存在的路径报错（而不是静默成功）。
+func TestDeleteMissingPath(t *testing.T) {
+	dir := t.TempDir()
+	fs, err := localfs.New(dir)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := fs.Delete(context.Background(), "nope.txt", false); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("want os.ErrNotExist, got %v", err)
+	}
+}
+
+// TestDeleteSymlinkKeepsTarget 验证指向目录的符号链接只删链接本身，
+// 不动链接目标（避免软链把删除操作放大到沙盒外）。
+func TestDeleteSymlinkKeepsTarget(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation on Windows needs extra privileges")
+	}
+	dir := t.TempDir()
+	target := filepath.Join(dir, "target")
+	writeFile(t, filepath.Join(target, "a.txt"), "hello")
+	link := filepath.Join(dir, "link")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatalf("Symlink: %v", err)
+	}
+
+	fs, err := localfs.New(dir)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := fs.Delete(context.Background(), "link", true); err != nil {
+		t.Fatalf("Delete symlink: %v", err)
+	}
+	if _, err := os.Lstat(link); !os.IsNotExist(err) {
+		t.Fatalf("symlink should be gone, stat err = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(target, "a.txt")); err != nil {
+		t.Fatalf("symlink target should survive: %v", err)
+	}
+}
+
 // --- Service / tools.Plugin wiring ---
 
-func TestNewPluginRegistersNineTools(t *testing.T) {
+func TestNewPluginRegistersTenTools(t *testing.T) {
 	dir := t.TempDir()
 	plugin, err := localfs.NewPlugin(dir)
 	if err != nil {
 		t.Fatalf("NewPlugin: %v", err)
 	}
-	if len(plugin.Tools()) != 9 {
-		t.Fatalf("len(plugin.Tools()) = %d, want 9", len(plugin.Tools()))
+	if len(plugin.Tools()) != 10 {
+		t.Fatalf("len(plugin.Tools()) = %d, want 10", len(plugin.Tools()))
 	}
 
 	api := tools.NewToolsAPI(&busContext{b: bus.New()})
@@ -641,6 +775,71 @@ func TestEditToolCallRejectsStaleModTime(t *testing.T) {
 	})
 	if !errors.Is(err, localfs.ErrModTimeMismatch) {
 		t.Errorf("want ErrModTimeMismatch, got %v", err)
+	}
+}
+
+// TestDeleteToolCall 验证 store.localfs.delete 对 LLM 可见并能删文件。
+func TestDeleteToolCall(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "a.txt"), "hello")
+
+	plugin, err := localfs.NewPlugin(dir)
+	if err != nil {
+		t.Fatalf("NewPlugin: %v", err)
+	}
+	api := tools.NewToolsAPI(&busContext{b: bus.New()})
+	if err := api.Register(plugin, nil); err != nil {
+		t.Fatalf("Register %s: %v", plugin.ID(), err)
+	}
+
+	// delete 是导出 tool（LLM 可见）
+	visible := false
+	for _, info := range api.Tools() {
+		if info.ID == "store.localfs.delete" {
+			visible = true
+		}
+	}
+	if !visible {
+		t.Fatal("store.localfs.delete should appear in Tools()")
+	}
+
+	if _, err := api.Call(context.Background(), "store.localfs.delete", map[string]any{
+		"path": "a.txt",
+	}); err != nil {
+		t.Fatalf("Call delete: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "a.txt")); !os.IsNotExist(err) {
+		t.Fatalf("file should be gone after delete tool, stat err = %v", err)
+	}
+}
+
+// TestDeleteToolRejectsDirWithoutRecursive 验证 delete tool 删目录时
+// 不传 recursive 会被拒绝（tool 层把 FS 的硬约束透出来）。
+func TestDeleteToolRejectsDirWithoutRecursive(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "sub", "a.txt"), "hello")
+
+	plugin, err := localfs.NewPlugin(dir)
+	if err != nil {
+		t.Fatalf("NewPlugin: %v", err)
+	}
+	api := tools.NewToolsAPI(&busContext{b: bus.New()})
+	if err := api.Register(plugin, nil); err != nil {
+		t.Fatalf("Register %s: %v", plugin.ID(), err)
+	}
+
+	_, err = api.Call(context.Background(), "store.localfs.delete", map[string]any{"path": "sub"})
+	if !errors.Is(err, localfs.ErrIsDirectory) {
+		t.Errorf("want ErrIsDirectory, got %v", err)
+	}
+
+	if _, err := api.Call(context.Background(), "store.localfs.delete", map[string]any{
+		"path": "sub", "recursive": true,
+	}); err != nil {
+		t.Fatalf("Call delete recursive: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "sub")); !os.IsNotExist(err) {
+		t.Fatalf("dir should be gone, stat err = %v", err)
 	}
 }
 

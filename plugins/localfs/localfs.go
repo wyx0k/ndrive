@@ -9,22 +9,35 @@
 //   - store.localfs.write-stream  —— 内部 tool，流式写入（供其它 plugin 原生调用）
 //   - store.localfs.write-markdown —— 写 markdown，可选带 YAML frontmatter
 //   - store.localfs.edit          —— 乐观并发的 old/new 字符串替换
+//   - store.localfs.delete        —— 删除文件/目录（目录需显式 recursive=true）
 //
 // 同时实现 tools.ServicePlugin（Service() 返回 builtin.FileService，
 // 供其他 plugin 原生流式调用 Open，不走 ToolsAPI.Call）和
 // tools.StatefulPlugin（后台监听文件系统变更，发 file.* 事件到 bus）。
 //
-// 所有路径参数都是相对 root 的相对路径；内部做沙盒校验，禁止通过 ".." 等
-// 方式越界访问 root 之外的文件。
+// # 沙盒
+//
+// 所有路径参数都是相对 root 的相对路径。每个路径都要过两层校验（见
+// FS.resolve）：
+//
+//  1. 词法校验 —— clean 之后必须仍在 root 内，拒绝 ".." 之类越界写法；
+//  2. 链接校验 —— 解开路径里的软链 / junction 之后，真实路径必须仍在 root 内。
+//     只做词法校验是不够的：root 里放一个指向 root 之外的链接，"link/x" 就能
+//     读到沙盒外的文件，沙盒形同虚设。
+//
+// 凡是"读内容"的路径（readBrief / matchesContent）也各自再校验一次——目录
+// 条目的中间路径由所在目录校验过，但末位可能是指向 root 之外的链接。
 package localfs
 
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -58,9 +71,19 @@ var ErrOldNotFound = fmt.Errorf("localfs: old text not found")
 // ErrOldNotUnique 在 Edit 的 old 子串在文件内容中出现多次时返回（必须恰好一次）。
 var ErrOldNotUnique = fmt.Errorf("localfs: old text is not unique")
 
+// ErrDeleteRoot 在试图删除沙盒根目录本身时返回（root 是沙盒边界，不允许被删掉）。
+var ErrDeleteRoot = fmt.Errorf("localfs: refusing to delete root")
+
+// ErrIsDirectory 在删除目录但没有显式要求递归时返回。
+var ErrIsDirectory = fmt.Errorf("localfs: path is a directory")
+
 // FS 是 localfs 对 builtin.FileService 的具体实现。
 type FS struct {
-	root        string
+	root string
+	// realRoot 是 root 的真实路径（解开 root 自身可能存在的软链）。
+	// 越界判定拿真实路径比，否则 root 是软链时（macOS 的 /tmp、挂载点）
+	// 所有访问都会被误判成越界。
+	realRoot    string
 	maxReadSize int64
 }
 
@@ -85,7 +108,11 @@ func New(root string, opts ...Option) (*FS, error) {
 	if !info.IsDir() {
 		return nil, fmt.Errorf("localfs: root %q is not a directory", abs)
 	}
-	f := &FS{root: abs, maxReadSize: DefaultMaxReadSize}
+	realRoot, err := evalLinks(abs)
+	if err != nil {
+		return nil, fmt.Errorf("localfs: resolve root symlinks %q: %w", abs, err)
+	}
+	f := &FS{root: abs, realRoot: realRoot, maxReadSize: DefaultMaxReadSize}
 	for _, opt := range opts {
 		opt(f)
 	}
@@ -95,22 +122,177 @@ func New(root string, opts ...Option) (*FS, error) {
 // Root 返回绝对根目录路径。
 func (f *FS) Root() string { return f.root }
 
-// resolve 把相对路径解析为绝对路径，并校验结果仍在 root 内。
-// 空字符串 / "." 代表根目录本身；任何经 ".." 等方式越界到 root 之外的
-// 路径都直接拒绝（不做静默裁剪），避免 "/../x" 这种写法被 Clean 吸收成
-// root 内路径而绕过沙盒校验。
+// contains 判断 abs 是否位于 root 之内（词法判断，不解链接）。
+// 供 watcher 事件过滤用：事件路径不在 root 内就不该发到 bus 上。
+func (f *FS) contains(abs string) bool {
+	return withinRoot(f.root, abs)
+}
+
+// resolve 把相对路径解析为绝对路径，并做两层安全校验：
+//
+//  1. 词法校验：clean 之后的结果必须仍在 root 内。空字符串 / "." 代表根
+//     目录本身；任何经 ".." 等方式越界到 root 之外的路径都直接拒绝（不做
+//     静默裁剪），避免 "/../x" 这种写法被 Clean 吸收成 root 内路径而绕过
+//     沙盒校验。
+//  2. 软链校验：把路径中已存在的部分解开软链后，真实路径必须仍在 root 内。
+//     只做词法校验是不够的 —— root 里放一个指向 root 之外的软链，就能让
+//     "link/passwd" 之类的路径读到沙盒外的文件，沙盒形同虚设。
+//
+// 目标不存在时（写新文件）按"已存在的最深祖先"校验，剩余段原样拼上。
+//
+// 已知残留风险：校验与实际 open 之间存在 TOCTOU 窗口——有本地写权限的
+// 攻击者可以在窗口内把路径换成软链。要彻底消除需要 O_NOFOLLOW 之类的
+// 打开语义，跨平台不可得，这里只保证"稳态下不越界"。
 func (f *FS) resolve(relPath string) (string, error) {
 	cleaned := filepath.Clean(filepath.ToSlash(relPath))
 	abs := filepath.Join(f.root, cleaned)
 
-	rel, err := filepath.Rel(f.root, abs)
-	if err != nil {
+	if !withinRoot(f.root, abs) {
 		return "", fmt.Errorf("%w: %q", ErrOutsideRoot, relPath)
 	}
-	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return "", fmt.Errorf("%w: %q", ErrOutsideRoot, relPath)
+	if err := f.checkRealPath(abs); err != nil {
+		if errors.Is(err, ErrOutsideRoot) {
+			// 用调用方给的相对路径报错，不把宿主机绝对路径漏出去。
+			return "", fmt.Errorf("%w: %q", ErrOutsideRoot, relPath)
+		}
+		return "", fmt.Errorf("localfs: resolve %q: %w", relPath, err)
 	}
 	return abs, nil
+}
+
+// checkRealPath 校验 abs 的真实路径（解开软链后）仍在 root 内。
+// 用于两处：resolve 的第二层校验；以及目录条目（List/Search 的子项）读取
+// 内容之前 —— 条目的中间路径由所在目录的 resolve 校验过，但末位可能是
+// 指向 root 之外的软链，读它的内容会把沙盒外的数据带出来。
+func (f *FS) checkRealPath(abs string) error {
+	real, err := realPath(abs)
+	if err != nil {
+		return fmt.Errorf("localfs: resolve path: %w", err)
+	}
+	if !withinRoot(f.realRoot, real) {
+		return ErrOutsideRoot
+	}
+	return nil
+}
+
+// withinRoot 判断 abs 是否位于 root 之内。
+// Windows 上文件系统默认大小写不敏感，比较前先折叠大小写（per-dir 大小写
+// 敏感开关罕见，忽略）。
+func withinRoot(root, abs string) bool {
+	if runtime.GOOS == "windows" {
+		root = strings.ToLower(root)
+		abs = strings.ToLower(abs)
+	}
+	rel, err := filepath.Rel(root, abs)
+	if err != nil {
+		// 卷不同（不同盘符）——一定不在 root 内。
+		return false
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return false
+	}
+	return true
+}
+
+// maxLinkDepth 限制解链接的最大层数，防止链接成环（link -> .. -> link）
+// 时无限展开。
+const maxLinkDepth = 40
+
+// evalLinks 把 abs 逐段解析成真实路径：每一段若是链接（Unix 软链 / Windows
+// 软链或 junction），就替换成链接目标再继续往下走。
+//
+// 刻意不用 filepath.EvalSymlinks：它在 Windows 上不认 junction ——
+// os.Lstat 对 junction 不置 ModeSymlink 标记，EvalSymlinks 因此原样返回链接
+// 路径。而 junction 恰恰是 Windows 上最常见的"目录指向别处"手法，不解析它等
+// 于沙盒没设防。这里改用 os.Readlink 判定：Unix 软链、Windows 软链和 junction
+// 都能读出目标；普通文件/目录读链接会报错，自然被当成"不是链接"。
+func evalLinks(abs string) (string, error) {
+	cur := abs
+	for depth := 0; depth < maxLinkDepth; depth++ {
+		next, changed, err := evalLinksOnce(cur)
+		if err != nil {
+			return "", err
+		}
+		if !changed {
+			return next, nil
+		}
+		cur = next
+	}
+	return "", fmt.Errorf("localfs: too many levels of symbolic links: %q", abs)
+}
+
+// evalLinksOnce 把路径中最靠前的那个链接替换成它的目标，返回 (新路径, 是否发生
+// 替换)。整条路径都不是链接时返回 (abs, false, nil)。
+func evalLinksOnce(abs string) (string, bool, error) {
+	vol := filepath.VolumeName(abs)
+	rest := strings.TrimLeft(abs[len(vol):], string(filepath.Separator))
+
+	cur := vol
+	if cur != "" {
+		cur += string(filepath.Separator)
+	}
+	parts := strings.Split(rest, string(filepath.Separator))
+	for i, part := range parts {
+		if part == "" {
+			continue
+		}
+		next := filepath.Join(cur, part)
+		target, err := os.Readlink(next)
+		if err != nil {
+			// 不是链接（普通文件/目录/不存在）——继续往下走。
+			cur = next
+			continue
+		}
+		if !filepath.IsAbs(target) {
+			target = filepath.Join(cur, target)
+		}
+		tail := ""
+		if i+1 < len(parts) {
+			tail = filepath.Join(parts[i+1:]...)
+		}
+		if tail == "" {
+			return target, true, nil
+		}
+		return filepath.Join(target, tail), true, nil
+	}
+	return abs, false, nil
+}
+
+// isLink 判断 path 是不是链接（Unix 软链 / Windows 软链或 junction）。
+// 不用 FileInfo.Mode()&ModeSymlink：Windows 的 junction 不带 ModeSymlink
+// 标记，只有 Readlink 能认出来。
+func isLink(path string) bool {
+	_, err := os.Readlink(path)
+	return err == nil
+}
+
+// realPath 返回 abs 的真实路径：把路径中已存在的部分解开链接（软链 / Windows
+// junction），尚未存在的部分（写新文件时的父目录/文件名）原样拼在已解析部分
+// 之后。
+func realPath(abs string) (string, error) {
+	rest := ""
+	cur := abs
+	for {
+		if _, err := os.Lstat(cur); err == nil {
+			break
+		} else if !os.IsNotExist(err) {
+			return "", err
+		}
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			break // 已到文件系统根，再往上没有意义
+		}
+		rest = filepath.Join(filepath.Base(cur), rest)
+		cur = parent
+	}
+	real, err := evalLinks(cur)
+	if err != nil {
+		return "", err
+	}
+	if rest == "" {
+		return real, nil
+	}
+	return filepath.Join(real, rest), nil
 }
 
 // toRel 把绝对路径转换回相对 root 的 "/" 分隔相对路径。
@@ -138,8 +320,13 @@ func (f *FS) entryFromInfo(abs string, info os.FileInfo) builtin.FileEntry {
 
 // readBrief 读取 .md 文件正文前 briefMaxChars 个字符（按 rune 计数）。
 // 任何读取失败都返回空字符串（简介是展示性信息，不影响主流程）。
-func readBrief(abs string) string {
+// 读之前先做软链校验：指向 root 之外的链接不读，否则软链会把沙盒外的
+// 文件内容带进 list/search 的结果里。
+func (f *FS) readBrief(abs string) string {
 	if !strings.EqualFold(filepath.Ext(abs), ".md") {
+		return ""
+	}
+	if err := f.checkRealPath(abs); err != nil {
 		return ""
 	}
 	fh, err := os.Open(abs)
@@ -190,7 +377,7 @@ func (f *FS) List(_ context.Context, path string, page, pageSize int) (builtin.L
 		}
 		entry := f.entryFromInfo(childAbs, childInfo)
 		if !entry.IsDir {
-			entry.Brief = readBrief(childAbs)
+			entry.Brief = f.readBrief(childAbs)
 		}
 		entries = append(entries, entry)
 	}
@@ -357,6 +544,42 @@ func (f *FS) Edit(_ context.Context, path string, old, newText string, expectedM
 	return f.Stat(context.Background(), path)
 }
 
+// Delete 删除 path 指向的文件或目录。
+//
+// 三条硬约束（防止"删一个文件"顺手把整个沙盒删掉）：
+//   - path 指向沙盒根目录本身（空路径 / "."）时返回 ErrDeleteRoot；
+//   - path 指向目录时必须显式传 recursive=true，否则返回 ErrIsDirectory
+//     （不默认递归删除，避免误删整棵子树）；
+//   - 路径越界（".." 等）由 resolve 拒绝，返回 ErrOutsideRoot。
+//
+// 用 Lstat 而不是 Stat：指向目录的符号链接按链接本身处理（删链接，不动目标）。
+func (f *FS) Delete(_ context.Context, path string, recursive bool) error {
+	abs, err := f.resolve(path)
+	if err != nil {
+		return err
+	}
+	if abs == f.root {
+		return fmt.Errorf("%w: %q", ErrDeleteRoot, path)
+	}
+	info, err := os.Lstat(abs)
+	if err != nil {
+		return fmt.Errorf("localfs: stat %q: %w", path, err)
+	}
+	if info.IsDir() {
+		if !recursive {
+			return fmt.Errorf("%w: %q (recursive=true required to delete a directory)", ErrIsDirectory, path)
+		}
+		if err := os.RemoveAll(abs); err != nil {
+			return fmt.Errorf("localfs: remove dir %q: %w", path, err)
+		}
+		return nil
+	}
+	if err := os.Remove(abs); err != nil {
+		return fmt.Errorf("localfs: remove %q: %w", path, err)
+	}
+	return nil
+}
+
 // Search 递归遍历 root，按文件名（及可选内容）子串匹配 query（大小写不敏感）。
 func (f *FS) Search(_ context.Context, query string, contentSearch bool) ([]builtin.FileEntry, error) {
 	if query == "" {
@@ -372,6 +595,12 @@ func (f *FS) Search(_ context.Context, query string, contentSearch bool) ([]buil
 		if path == f.root {
 			return nil
 		}
+		// 目录链接（Unix 软链 / Windows junction）不进入：跟着它递归会把
+		// root 之外的目录树枚举出来。链接本身仍可按名字匹配到（只报条目
+		// 自身的元信息，不读它的内容）。
+		if d.IsDir() && isLink(path) {
+			return filepath.SkipDir
+		}
 		nameMatch := strings.Contains(strings.ToLower(d.Name()), q)
 		if nameMatch {
 			info, err := d.Info()
@@ -380,7 +609,7 @@ func (f *FS) Search(_ context.Context, query string, contentSearch bool) ([]buil
 			}
 			entry := f.entryFromInfo(path, info)
 			if !entry.IsDir {
-				entry.Brief = readBrief(path)
+				entry.Brief = f.readBrief(path)
 			}
 			results = append(results, entry)
 			return nil
@@ -388,13 +617,13 @@ func (f *FS) Search(_ context.Context, query string, contentSearch bool) ([]buil
 		if !contentSearch || d.IsDir() {
 			return nil
 		}
-		if matchesContent(path, q) {
+		if f.matchesContent(path, q) {
 			info, err := d.Info()
 			if err != nil {
 				return nil //nolint: nilerr
 			}
 			entry := f.entryFromInfo(path, info)
-			entry.Brief = readBrief(path)
+			entry.Brief = f.readBrief(path)
 			results = append(results, entry)
 		}
 		return nil
@@ -406,7 +635,12 @@ func (f *FS) Search(_ context.Context, query string, contentSearch bool) ([]buil
 }
 
 // matchesContent 检查文件内容是否包含 query（已转小写）；任何读取失败都视为不匹配。
-func matchesContent(path string, lowerQuery string) bool {
+// 读之前先做软链校验：指向 root 之外的链接不读（内容搜索不能顺着软链把
+// 沙盒外的文件内容搜出来）。
+func (f *FS) matchesContent(path string, lowerQuery string) bool {
+	if err := f.checkRealPath(path); err != nil {
+		return false
+	}
 	fh, err := os.Open(path)
 	if err != nil {
 		return false

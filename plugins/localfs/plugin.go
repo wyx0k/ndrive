@@ -13,7 +13,7 @@ import (
 	"github.com/wyx0k/ndrive/tools/builtin"
 )
 
-// containerID 是 localfs 容器的命名空间；5 个 tool 的完整 id 都是
+// containerID 是 localfs 容器的命名空间；容器内 tool 的完整 id 都是
 // containerID + "." + 下面的短 id。
 const containerID tools.PluginID = "store.localfs"
 
@@ -26,6 +26,7 @@ const (
 	toolWrite         = "write"
 	toolWriteMarkdown = "write-markdown"
 	toolEdit          = "edit"
+	toolDelete        = "delete"
 	// toolOpen / toolWriteStream 是 Internal tool：不出现在 Tools()/Funcs()，
 	// 只能被其他 plugin 通过 ToolsAPI.Call("store.localfs.xxx", ...) 内部调用
 	// （如 zip 解析器需要 io.ReadCloser 流式读取；上游转发 HTTP body 需要
@@ -50,8 +51,9 @@ type Config struct {
 	DebounceInterval time.Duration
 }
 
-// localfsPlugin 是 store.localfs 容器：list/read/search/stat/open 共享同一个
-// *FS 实例和同一个文件监听 watcher。容器本身实现 ServicePlugin（Service()
+// localfsPlugin 是 store.localfs 容器：容器内所有 tool（list/read/search/stat/
+// write/write-markdown/edit/delete/open-stream/write-stream）共享同一个 *FS
+// 实例和同一个文件监听 watcher。容器本身实现 ServicePlugin（Service()
 // 返回 *FS）和 StatefulPlugin（启停文件监听），不再像旧版本那样随意挂在某一
 // 个 tool 上。
 type localfsPlugin struct {
@@ -59,7 +61,7 @@ type localfsPlugin struct {
 	watcher *filewatcher.Watcher
 }
 
-// NewPlugin 构造 store.localfs 容器（1 个 tools.Plugin，内含 5 个 tool），
+// NewPlugin 构造 store.localfs 容器（1 个 tools.Plugin，内含一组 tool），
 // 供 ws.Register 注册。root 是沙盒根目录。
 func NewPlugin(root string, opts ...Option) (tools.Plugin, error) {
 	fs, err := New(root, opts...)
@@ -82,6 +84,7 @@ func (p *localfsPlugin) Tools() []tools.Tool {
 		p.writeStreamTool(),
 		p.writeMarkdownTool(),
 		p.editTool(),
+		p.deleteTool(),
 	}
 }
 
@@ -331,6 +334,36 @@ func (p *localfsPlugin) editTool() tools.Tool {
 	}
 }
 
+// deleteTool 删除文件或目录。删除目录必须显式传 recursive=true，否则报错
+// （防止"删一个文件"顺手把整棵子树删掉）；删除沙盒根目录本身一律拒绝。
+func (p *localfsPlugin) deleteTool() tools.Tool {
+	return tools.SimplePluginDef{
+		ID_:          toolDelete,
+		Description_: "删除文件或目录（删除目录必须显式传 recursive=true，否则报错；不能删除根目录本身）",
+		Schema_: map[string]any{
+			"type":     "object",
+			"required": []string{"path"},
+			"properties": map[string]any{
+				"path":      map[string]any{"type": "string", "description": "相对根目录的路径"},
+				"recursive": map[string]any{"type": "boolean", "description": "递归删除目录及其全部内容，默认 false"},
+			},
+		},
+		Read_: false,
+		Fn_: func(ctx context.Context, _ tools.Context, args any) (any, error) {
+			a, ok := args.(map[string]any)
+			if !ok {
+				return nil, fmt.Errorf("localfs: expected map args, got %T", args)
+			}
+			path, _ := a["path"].(string)
+			recursive, _ := a["recursive"].(bool)
+			if err := p.fs.Delete(ctx, path, recursive); err != nil {
+				return nil, err
+			}
+			return map[string]any{"path": path, "deleted": true}, nil
+		},
+	}
+}
+
 // Service 返回 FS 本身（实现 builtin.FileService），供其他 plugin 原生调用。
 func (p *localfsPlugin) Service() any { return p.fs }
 
@@ -386,6 +419,11 @@ func publishFileEvent(ws tools.Context, fs *FS, ev filewatcher.Event) {
 	case filewatcher.Rename:
 		topic = topicRenamed
 	default:
+		return
+	}
+	// 事件路径必须仍在 root 内——否则 toRel 会算出带 ".." 的相对路径，把
+	// 宿主机目录结构漏到 bus 上。
+	if !fs.contains(ev.Path) {
 		return
 	}
 	ws.Bus().Publish(topic, map[string]any{
