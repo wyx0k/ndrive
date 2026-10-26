@@ -46,8 +46,9 @@ func (w *Workspace) Context(ctx context.Context) context.Context {
 }
 
 // Register 是 ws.API().Register 的便捷包装。
+// p 可以是 tools.Plugin（容器）或裸 tools.Tool（自动包装成单 tool 容器）。
 // cfg 是初始配置，供 plugin 实现 StatefulPlugin 时在 StartPlugin 中使用；不需要传 nil。
-func (w *Workspace) Register(p tools.Plugin, cfg any) error {
+func (w *Workspace) Register(p any, cfg any) error {
 	return w.api.Register(p, cfg)
 }
 

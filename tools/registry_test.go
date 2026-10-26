@@ -9,7 +9,9 @@ import (
 	"github.com/wyx0k/ndrive/tools"
 )
 
-// stubPlugin 是测试用的最小 plugin。
+// stubPlugin 是测试用的最小 tool；同时实现 Tool 和 Plugin（单 tool 容器，
+// 容器 id 就是 s.id），这样既可以直接传给 Register（自动识别为 Plugin），
+// 也可以放进 []tools.Plugin{...} 批量注册的切片字面量里。
 type stubPlugin struct {
 	id        tools.PluginID
 	read      bool
@@ -21,12 +23,110 @@ func (s *stubPlugin) Description() string         { return s.id + " desc" }
 func (s *stubPlugin) Schema() map[string]any      { return map[string]any{"type": "object"} }
 func (s *stubPlugin) DependsOn() []tools.PluginID { return s.dependsOn }
 func (s *stubPlugin) Read() bool                  { return s.read }
+func (s *stubPlugin) Internal() bool              { return false }
 func (s *stubPlugin) Call(_ context.Context, _ tools.Context, _ any) (any, error) {
 	return nil, nil
 }
 
+// Tools 让 stubPlugin 同时满足 Plugin：返回只含自己的单 tool 列表，tool 侧
+// ID() 置空，这样完整 id = 容器 id = s.id，不做额外拼接（和 SimplePluginDef
+// 的 Tools() 实现同一思路）。
+func (s *stubPlugin) Tools() []tools.Tool { return []tools.Tool{stubToolView{s}} }
+
+// stubToolView 把 *stubPlugin 包成 tool 视图，只覆盖 ID()。
+type stubToolView struct {
+	*stubPlugin
+}
+
+func (stubToolView) ID() string { return "" }
+
 func newAPI() *tools.ToolsAPI {
 	return tools.NewToolsAPI(nil)
+}
+
+// stubTool 是测试用的最小 Tool，供 multiToolStub 这种真正的多 tool 容器使用。
+type stubTool struct {
+	id       string
+	internal bool
+	read     bool
+	fn       func(ctx context.Context, ws tools.Context, args any) (any, error)
+}
+
+func (t *stubTool) ID() string                  { return t.id }
+func (t *stubTool) Description() string         { return t.id + " desc" }
+func (t *stubTool) Schema() map[string]any      { return map[string]any{"type": "object"} }
+func (t *stubTool) DependsOn() []tools.PluginID { return nil }
+func (t *stubTool) Read() bool                  { return t.read }
+func (t *stubTool) Internal() bool              { return t.internal }
+func (t *stubTool) Call(ctx context.Context, ws tools.Context, args any) (any, error) {
+	if t.fn != nil {
+		return t.fn(ctx, ws, args)
+	}
+	return nil, nil
+}
+
+// multiToolStub 是测试用的真正多 tool 容器（和 stubPlugin 的单 tool 自包装不同），
+// 用于验证容器级别的 Internal 过滤、UpdatePluginConfig/Service 按容器 id 操作、
+// StatefulPlugin 挂在容器而不是某个 tool 上的场景。
+type multiToolStub struct {
+	cid         tools.PluginID
+	toolList    []tools.Tool
+	cfg         any
+	updateErr   error
+	updateCalls int
+	svc         any
+	startCalls  int
+	stopCalls   int
+	startErr    error
+	stopErr     error
+}
+
+func (m *multiToolStub) ID() tools.PluginID { return m.cid }
+func (m *multiToolStub) Tools() []tools.Tool {
+	return m.toolList
+}
+
+func (m *multiToolStub) UpdateConfig(cfg any) error {
+	m.updateCalls++
+	if m.updateErr != nil {
+		return m.updateErr
+	}
+	m.cfg = cfg
+	return nil
+}
+
+func (m *multiToolStub) Service() any { return m.svc }
+
+func (m *multiToolStub) StartPlugin(ws tools.Context, cfg any) error {
+	m.startCalls++
+	return m.startErr
+}
+
+func (m *multiToolStub) StopPlugin() error {
+	m.stopCalls++
+	return m.stopErr
+}
+
+// bareStatefulTool 是测试用的裸 Tool（不实现 Plugin），自己直接挂
+// StartPlugin/StopPlugin——模拟 greeterPlugin 这种手写类型通过 AsPlugin
+// 自动包装注册、但 StatefulPlugin 断言必须落在原始 Tool 值上，而不是合成出来
+// 的 singleToolPlugin 容器上。
+type bareStatefulTool struct {
+	stubTool
+	startCalls int
+	stopCalls  int
+	startErr   error
+	stopErr    error
+}
+
+func (b *bareStatefulTool) StartPlugin(ws tools.Context, cfg any) error {
+	b.startCalls++
+	return b.startErr
+}
+
+func (b *bareStatefulTool) StopPlugin() error {
+	b.stopCalls++
+	return b.stopErr
 }
 
 // --- Register ---
@@ -578,6 +678,107 @@ func TestRegisterAllStatefulRollback(t *testing.T) {
 	}
 	if len(api.Plugins()) != 0 {
 		t.Errorf("registry should be empty after rollback, got %d", len(api.Plugins()))
+	}
+}
+
+// TestRegisterAllStatefulRollbackMultipleFailMiddle 用 3 个 stateful plugin，
+// 第 3 个（拓扑顺序中间，因为 b.c 依赖 a.b）启动失败；验证已启动的前两个
+// 按逆序被回滚（先停最后启动的），且整批不 commit。
+func TestRegisterAllStatefulRollbackMultipleFailMiddle(t *testing.T) {
+	api := newAPI()
+	var stopOrder []tools.PluginID
+
+	mk := func(id tools.PluginID, dep tools.PluginID, startErr error) *statefulStub {
+		s := &statefulStub{stubPlugin: stubPlugin{id: id}, startErr: startErr}
+		return s
+	}
+	sp1 := mk("a.b", "", nil)
+	sp2 := mk("b.c", "a.b", nil)
+	sp2.stubPlugin.dependsOn = []tools.PluginID{"a.b"}
+	sp3 := mk("c.d", "b.c", errors.New("boom"))
+	sp3.stubPlugin.dependsOn = []tools.PluginID{"b.c"}
+
+	// 包装 StopPlugin 记录停止顺序，不改变 statefulStub 本身的计数逻辑。
+	wrap := func(id tools.PluginID, s *statefulStub) tools.Plugin {
+		return &stopOrderStub{statefulStub: s, id: id, order: &stopOrder}
+	}
+
+	err := api.RegisterAll([]tools.Plugin{wrap("a.b", sp1), wrap("b.c", sp2), wrap("c.d", sp3)})
+	if err == nil {
+		t.Fatal("want error from sp3 StartPlugin failure")
+	}
+	if sp1.startCalls != 1 || sp2.startCalls != 1 {
+		t.Errorf("sp1/sp2 should have started, got sp1=%d sp2=%d", sp1.startCalls, sp2.startCalls)
+	}
+	if sp3.startCalls != 1 {
+		t.Errorf("sp3 StartPlugin should have been attempted once, got %d", sp3.startCalls)
+	}
+	if sp1.stopCalls != 1 || sp2.stopCalls != 1 {
+		t.Errorf("sp1/sp2 should be rolled back, got sp1.stop=%d sp2.stop=%d", sp1.stopCalls, sp2.stopCalls)
+	}
+	if sp3.stopCalls != 0 {
+		t.Errorf("sp3 never started, should not be stopped, got %d", sp3.stopCalls)
+	}
+	want := []tools.PluginID{"b.c", "a.b"} // 逆序：最后启动的先停
+	if !equalIDs(stopOrder, want) {
+		t.Errorf("stop order = %v, want %v (reverse of start order)", stopOrder, want)
+	}
+	if len(api.Plugins()) != 0 {
+		t.Errorf("registry should be empty after rollback, got %d", len(api.Plugins()))
+	}
+}
+
+// stopOrderStub 包装 *statefulStub，只用于记录 StopPlugin 的调用顺序；
+// Register/RegisterAll 走的是 lifecycleTarget == plugin 本身这条路径，所以
+// 这里直接嵌入 *statefulStub 作为真正的 Plugin，外层只加一层顺序记录。
+type stopOrderStub struct {
+	*statefulStub
+	id    tools.PluginID
+	order *[]tools.PluginID
+}
+
+func (s *stopOrderStub) StopPlugin() error {
+	*s.order = append(*s.order, s.id)
+	return s.statefulStub.StopPlugin()
+}
+
+// --- 裸 Tool 自动包装场景下的 StatefulPlugin（lifecycleTarget） ---
+
+// TestRegisterBareToolStatefulPlugin 验证手写裸 Tool（不实现 Plugin，像
+// greeterPlugin 那样）直接把 StartPlugin/StopPlugin 挂在自己身上时，
+// Register 通过 AsPlugin 自动包装成单 tool 容器后，StatefulPlugin 断言仍然
+// 落在原始 Tool 值上（lifecycleTarget），能正确触发启停。这正是修复
+// singleToolPlugin 能力泄漏 bug 的核心场景，此前没有专门的回归测试。
+func TestRegisterBareToolStatefulPlugin(t *testing.T) {
+	api := newAPI()
+	bt := &bareStatefulTool{stubTool: stubTool{id: "fs.watch"}}
+	if err := api.Register(bt, nil); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	if bt.startCalls != 1 {
+		t.Errorf("want StartPlugin called once, got %d", bt.startCalls)
+	}
+	if err := api.StopAllPlugins(); err != nil {
+		t.Fatalf("StopAllPlugins: %v", err)
+	}
+	if bt.stopCalls != 1 {
+		t.Errorf("want StopPlugin called once, got %d", bt.stopCalls)
+	}
+}
+
+// TestRegisterBareToolWithoutStatefulDoesNotLeakCapability 验证普通裸 Tool
+// （不实现 StartPlugin/StopPlugin）被 AsPlugin 自动包装后，合成出来的
+// singleToolPlugin 容器本身绝不会意外满足 StatefulPlugin——否则所有普通
+// tool 的注册都会被当成 stateful 来处理。
+func TestRegisterBareToolWithoutStatefulDoesNotLeakCapability(t *testing.T) {
+	api := newAPI()
+	plain := &stubTool{id: "util.plain"}
+	if err := api.Register(plain, nil); err != nil {
+		t.Fatalf("Register plain tool: %v", err)
+	}
+	// 没有 StartPlugin/StopPlugin，StopAllPlugins 应该什么都不做、不报错。
+	if err := api.StopAllPlugins(); err != nil {
+		t.Fatalf("StopAllPlugins on non-stateful registry: %v", err)
 	}
 }
 

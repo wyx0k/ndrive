@@ -297,38 +297,69 @@ type Context interface {
     // 未来扩展：Logger() / Metrics() / Config() 等
 }
 
-// Plugin 插件接口
+// Plugin 容器接口：只负责"我是谁 + 我下面有哪些 tool"
 type Plugin interface {
     ID() PluginID
+    Tools() []Tool
+}
+
+// Tool 可调用单元接口：真正承担 Call/Schema/权限等职责
+type Tool interface {
+    ID() string              // 容器内局部 id；单 tool 容器可返回 ""（代表"我就是 full id"）
     Description() string
     Schema() map[string]any
-    DependsOn() []PluginID
+    DependsOn() []PluginID   // 依赖的其它容器 id
     Read() bool
+    Internal() bool          // true：从 Tools()/Funcs() 投影隐藏，但仍可被 Call(fullID) 调用
     Call(ctx context.Context, ws Context, args any) (any, error)
 }
 
-// SimplePluginDef helper struct（声明式描述 plugin）
-// 用 struct + getter 让用户免手写 Plugin 接口 5 个方法
+// full id 规则：toolID 为空 → fullID = containerID；否则 fullID = containerID + "." + toolID
+func fullToolID(containerID PluginID, toolID string) PluginID
+
+// SimplePluginDef helper struct（声明式描述一个裸 tool）
+// 同时实现 Tool（7 个 getter）和 Plugin（Tools() 返回包装后的自身）—— 即"单 tool 容器"
 type SimplePluginDef struct {
-    ID_         PluginID
+    ID_          PluginID
     Description_ string
-    Schema_     map[string]any
-    DependsOn_  []PluginID
-    Read_       bool
-    Fn_         func(ctx context.Context, ws Context, args any) (any, error)
+    Schema_      map[string]any
+    DependsOn_   []PluginID
+    Read_        bool
+    Internal_    bool
+    Fn_          func(ctx context.Context, ws Context, args any) (any, error)
 }
-// 5 个 getter 自动实现 Plugin
+
+// AsPlugin 把一个裸 Tool 包装成单 tool 容器（Register 内部对裸 Tool 自动调用）
+func AsPlugin(t Tool) Plugin
+
+// 容器级可选能力接口，每个容器生效一次（不是每个 tool）
+type StatefulPlugin interface {
+    Plugin
+    StartPlugin(ws Context, cfg any) error
+    StopPlugin() error
+}
+type ReloadablePlugin interface {
+    Plugin
+    UpdateConfig(cfg any) error
+}
+type ServicePlugin interface {
+    Plugin
+    Service() any
+}
 
 // ToolsAPI 注册中心
 type ToolsAPI struct { /* ... */ }
 
 func NewToolsAPI(ws Context) *ToolsAPI
-func (api *ToolsAPI) Register(plugin Plugin) error
-func (api *ToolsAPI) RegisterAll(plugins []Plugin) error   // 批量注册：按 DependsOn 排序后逐个 Register
+func (api *ToolsAPI) Register(v any, cfg any) error         // v: 容器 Plugin 或裸 Tool（自动 AsPlugin 包装）
+func (api *ToolsAPI) RegisterAll(plugins []Plugin) error    // 批量注册：按 DependsOn 排序后逐个 StartPlugin
 func (api *ToolsAPI) Resolve() ([]PluginID, error)
 func (api *ToolsAPI) Call(ctx context.Context, id PluginID, args any) (any, error)
-func (api *ToolsAPI) Tools() []Tool
-func (api *ToolsAPI) Funcs() []Func
+func (api *ToolsAPI) Tools() []ToolInfo                     // 过滤 Internal()==true
+func (api *ToolsAPI) Funcs() []Func                         // 过滤 Internal()==true
+func (api *ToolsAPI) UpdatePluginConfig(id PluginID, cfg any) error  // 按容器 id 查找 ReloadablePlugin
+func (api *ToolsAPI) Service(id PluginID) (any, error)                // 按容器 id 查找 ServicePlugin
+func (api *ToolsAPI) StopAllPlugins() error                           // 对所有 StatefulPlugin 调 StopPlugin，errors.Join 汇总
 
 // 错误
 var (
@@ -344,40 +375,46 @@ func (e *CycleError) Error() string
 // 调用方用 errors.As(err, &cycleErr) 拿环路径；errors.Is(err, ErrPluginCycle) 判断是否是环
 
 // 双视图投影
-type Tool struct {
-    ID          PluginID
+type ToolInfo struct {
+    ID          PluginID  // full id
     Description string
     Schema      map[string]any
 }
 type Func struct {
-    ID   PluginID
+    ID   PluginID  // full id
     Call func(ctx context.Context, args any) (any, error)
 }
 ```
 
-**v5 关键点**（walkthrough round 3 已定）：
+**v5 关键点**（walkthrough round 3 已定，Plugin/Tool 二层拆分为后续补充 round 已定）：
 
 1. **数据模型归零**：tools 不规定 plugin 操作什么（不是 tree，不是 table，不是 doc —— plugin 自己定）
-2. **依赖图 + RegisterAll**：
-   - 单 `Register(plugin)` 仍可用（用户按依赖顺序写）
-   - `RegisterAll([]Plugin)` 批量注册：内部按 `DependsOn` 拓扑排序后逐个 `Register`，声明顺序自由
+2. **Plugin 是容器，Tool 才是可调用单元**：一个 `Plugin` 容器下可以挂多个 `Tool`（如 `store.localfs` 下的 `list`/`read`/`search`/`stat`/`open`），full id 由 `containerID + "." + toolID` 拼出；`SimplePluginDef` 这种"只有一个 tool"的场景通过同时实现两个接口（`Tools()` 返回包一层的自身，局部 id 返回 `""`）保持声明方式不变
+3. **`Internal()` 是可见性开关，不是可调用性开关**：`Internal()==true` 的 tool 从 `Tools()`/`Funcs()` 隐藏（LLM/UI 看不到），但 `ToolsAPI.Call(ctx, fullID, args)` 仍能正常调用 —— 用于"只想被其它 tool 通过 `DependsOn` 间接复用、不想直接暴露"的场景（如 `store.localfs.open-stream`）
+4. **容器级可选能力接口**：`StatefulPlugin`（启动/停止生命周期，典型如文件监听）、`ReloadablePlugin`（热更新配置）、`ServicePlugin`（把容器内部服务对象暴露给其它 Go 代码直接拿，如 `*FS`）；三者都按"容器 id"生效一次，不按 tool 生效
+5. **依赖图 + RegisterAll**：
+   - 单 `Register(v, cfg)` 仍可用（`v` 可以是容器也可以是裸 `Tool`）
+   - `RegisterAll([]Plugin)` 批量注册：内部按 `DependsOn` 拓扑排序，按容器去重后依次 `StartPlugin`，声明顺序自由；中途失败按已启动顺序反向 `StopPlugin` 回滚，不留半成品
    - `Resolve()` 时仍做环检测
-3. **环检测错误**：`ErrPluginCycle` 哨兵 + `CycleError{Cycle: []PluginID}` typed error；调用方用 `errors.Is` / `errors.As` 拿通用判断和详细路径
-4. **permission 入口**：`Call` 第一步根据 `plugin.Read()` 路由到 `c.CheckRead(ctx, id)` / `c.CheckWrite(ctx, id)`（round 2 决议）
-5. **事件 topic 区分**（round 3 决议，与 round 1 区别）：
-   - **LLM 看到的工具名 = `<id>`**（不带 `plugin.` 前缀；`store.localfile.write`）
-   - **引擎事件 topic = `plugin.<id>.<lifecycle>`**（**带 `plugin.` 前缀**；`plugin.store.localfile.write.start`）
+6. **环检测错误**：`ErrPluginCycle` 哨兵 + `CycleError{Cycle: []PluginID}` typed error；调用方用 `errors.Is` / `errors.As` 拿通用判断和详细路径
+7. **permission 入口**：`Call` 第一步根据 `tool.Read()` 路由到 `c.CheckRead(ctx, fullID)` / `c.CheckWrite(ctx, fullID)`（round 2 决议）
+8. **事件 topic 区分**（round 3 决议，与 round 1 区别）：
+   - **LLM 看到的工具名 = full id**（不带 `plugin.` 前缀；`store.localfs.list`）
+   - **引擎事件 topic = `plugin.<full-id>.<lifecycle>`**（**带 `plugin.` 前缀**；`plugin.store.localfs.list.start`）
    - 理由：事件是 engine 内部广播，需要 `plugin.` 前缀避免与用户自定义 topic 冲突；LLM 工具名要简洁
-6. **builtin/util.echo**：v5 起步内置 1 个最小 plugin `util.echo`（返 args 原样），供 `tools` 包自带 e2e 测试用；其他 plugin 用户自己写
-7. **依赖方向避免循环**：tools 不直接 import ndrive，而是定义 `tools.Context` 最小接口（起步只有 `Bus() bus.Bus`）；`ndrive.Workspace` 实现该接口，`NewToolsAPI(ws)` 时塞入
+9. **builtin/util.echo**：v5 起步内置 1 个最小 plugin `util.echo`（返 args 原样），供 `tools` 包自带 e2e 测试用；其他 plugin 用户自己写
+10. **依赖方向避免循环**：tools 不直接 import ndrive，而是定义 `tools.Context` 最小接口（起步只有 `Bus() bus.Bus`）；`ndrive.Workspace` 实现该接口，`NewToolsAPI(ws)` 时塞入
 
 **外部 import**：`github.com/wyx0k/ndrive/tools`
+
+**worked example**：`plugins/localfs` —— 一个真正的多 tool 容器，导出 `list`/`read`/`search`/`stat`/`write`/`write-markdown`/`edit`，`open`/`write-stream` 设为 `Internal_: true`（只给容器内部/其它 tool 复用，不直接暴露）；容器同时实现 `StatefulPlugin`（`StartPlugin` 启动文件监听、发布 `file.*` 事件；`StopPlugin` 关闭监听）和 `ServicePlugin`（`Service()` 返回底层 `*FS`，供 `builtin.FileService` 等 Go 代码直接消费）。`edit` 演示了乐观并发校验：调用方传入之前 `stat`/`list` 读到的 `modTime`，与文件当前修改时间不一致就拒绝写入（`ErrModTimeMismatch`），避免覆盖掉别处并发产生的修改。
 
 **walkthrough 决议记录**：
 - ✅ Forward ref：方案 c（`RegisterAll` 批量，按 DependsOn 排序）
 - ✅ 环检测错误：方案 c（`ErrPluginCycle` 哨兵 + `CycleError` typed error）
-- ✅ 事件 topic：`plugin.<id>.<lifecycle>` 带前缀；LLM 工具名 `<id>` 不带前缀
+- ✅ 事件 topic：`plugin.<full-id>.<lifecycle>` 带前缀；LLM 工具名 `<full-id>` 不带前缀
 - ✅ builtin 起步：只 `util.echo`
+- ✅ Plugin/Tool 二层拆分：容器与可调用单元分离，支持一个容器挂多个 tool + `Internal()` 可见性开关（详见 [SPECS.md Spec 12](SPECS.md)）
 
 ---
 
@@ -436,7 +473,7 @@ func (w *Workspace) Close() error
 func (w *Workspace) Bus() bus.Bus
 func (w *Workspace) API() *tools.ToolsAPI
 func (w *Workspace) Context(ctx context.Context) context.Context
-func (w *Workspace) Register(def tools.SimplePluginDef) error
+func (w *Workspace) Register(p any, cfg any) error   // p: 容器 tools.Plugin 或裸 tools.Tool（自动包装成单 tool 容器）
 func (w *Workspace) SetPolicy(ctx context.Context, userID string, mode permission.Mode) error
 func (w *Workspace) GetPolicy(ctx context.Context, userID string) (permission.Mode, error)
 func (w *Workspace) ListPolicies(ctx context.Context) ([]permission.Binding, error)
@@ -452,13 +489,13 @@ func (w *Workspace) DeletePolicy(ctx context.Context, userID string) error
 **v5 关键点**（walkthrough round 4 已定）：
 
 1. **根包**就是**容器层**，**没有 re-export、没有 type alias、没有转发函数** —— 所有类型直接定义、所有方法直接实现
-2. **Bizmodel 整条移除**（v4 是核心数据层，v5 不再有此概念）—— 用户的所有能力注册都直接 `ws.Register(tools.SimplePluginDef{...})`，不需要先创建 Bizmodel 容器
+2. **Bizmodel 整条移除**（v4 是核心数据层，v5 不再有此概念）—— 用户的所有能力注册都直接 `ws.Register(tools.SimplePluginDef{...}, nil)`，不需要先创建 Bizmodel 容器
 3. **meta 存储 3 类 key**：
    - `workspace/<id>` —— workspace 配置 / 元信息
    - `permission_binding/<wsID>/<userID>` —— permission 绑定
    - `plugin/<id>` —— plugin 描述符（启动时回放）
 4. **id 工厂**是根包内部依赖；外部不感知 ID 怎么生成
-5. **builtin plugin 不自动注册** —— `util.echo` 在 `tools/builtin` 包内提供，**用户需显式调 `ws.API().RegisterBuiltin(builtin.Echo())`** 才会进注册表（opt-in 风格）
+5. **builtin plugin 不自动注册** —— `util.echo` 在 `tools/builtin` 包内提供，**用户需显式调 `ws.Register(builtin.Echo(), nil)`**（或 `ws.API().Register(...)`）才会进注册表（opt-in 风格）
 6. **workerID 冲突检测**（方案 c）：
    - `cfg.WorkerID == 0` —— 合法值，snowflake 用进程内默认（单进程场景）
    - `cfg.WorkerID != 0` —— 进程级全局检测：同一进程内 2 个 ws 用相同 workerID → `OpenWorkspace` 返 error
@@ -476,7 +513,7 @@ func (w *Workspace) DeletePolicy(ctx context.Context, userID string) error
 
 **walkthrough 决议记录**：
 - ✅ 源文件拆分：方案 b（4 个 .go 文件 + ndrive.go 入口）
-- ✅ builtin 注册时机：方案 b（opt-in，用户显式 `RegisterBuiltin`）
+- ✅ builtin 注册时机：方案 b（opt-in，用户显式 `ws.Register(builtin.Echo(), nil)`）
 - ✅ workerID 冲突检测：方案 c（0=自动，非 0 严格）
 - ✅ meta 失败行为：方案 a（fail-fast 返 error）
 
@@ -498,39 +535,72 @@ type PluginID = string  // "xx.xx.xx..." 点分形式，>=2 段
 
 **不带 `plugin.` 前缀** —— v4 历史曾有 `plugin.<id>` 形式，v5 明确移除；id 本身就是 plugin 的身份，前缀冗余。
 
-### 6.2 `Plugin` 接口
+### 6.2 `Plugin` / `Tool` 二层接口
 
 ```go
+// Plugin：容器，只负责身份 + 列出下面的 tool
 type Plugin interface {
     ID() PluginID
+    Tools() []Tool
+}
+
+// Tool：可调用单元，承担原来单层 Plugin 的全部职责
+type Tool interface {
+    ID() string                     // 容器内局部 id；""表示"我就是容器的 full id"（单 tool 容器）
     Description() string
     Schema() map[string]any         // JSON Schema
-    DependsOn() []PluginID         // 依赖的其他 plugin
+    DependsOn() []PluginID          // 依赖的其他容器
     Read() bool                     // true = 读，不触发 permission 询问
+    Internal() bool                 // true = 从 Tools()/Funcs() 隐藏，但仍可 Call(fullID)
     Call(ctx context.Context, ws Context, args any) (any, error)
 }
 ```
 
+- 为什么拆成两层：单层 `Plugin` 无法表达"一个容器下挂多个 tool"（如本地文件系统的 `list`/`read`/`search`/`stat`/`open`），也无法表达"内部 tool"（想被其它 tool 通过 `DependsOn` 间接复用，但不想直接暴露给 LLM/UI）
 - `Read() bool` 必须显式声明，permission 据此走读/写分支
-- `Schema()` 返回的 JSON Schema 同时用于 LLM tool 生成（Tool 视图）和 UI 渲染（Func 视图）
+- `Internal() bool` 默认 `false`；是**可见性**开关，不是**可调用性**开关 —— `Internal()==true` 的 tool 永远可以被 `ToolsAPI.Call(ctx, fullID, args)` 正常调用，只是不出现在 `Tools()`/`Funcs()` 投影里
+- `Schema()` 返回的 JSON Schema 同时用于 LLM tool 生成（`ToolInfo` 视图）和 UI 渲染（`Func` 视图）
+- full id 规则：`toolID == ""` 时 full id = 容器 id；否则 full id = `容器id + "." + toolID`
 
 ### 6.3 `SimplePluginDef` helper struct
 
 ```go
 type SimplePluginDef struct {
-    ID_         PluginID
+    ID_          PluginID
     Description_ string
-    Schema_     map[string]any
-    DependsOn_  []PluginID
-    Read_       bool
-    Fn_         func(ctx context.Context, ws Context, args any) (any, error)
+    Schema_      map[string]any
+    DependsOn_   []PluginID
+    Read_        bool
+    Internal_    bool
+    Fn_          func(ctx context.Context, ws Context, args any) (any, error)
 }
 ```
 
-- 5 个 getter（`ID()` / `Description()` / `Schema()` / `DependsOn()` / `Read()`）自动实现 `Plugin` 接口
-- `Call()` 直接转发到 `Fn_`
+- 7 个 getter（`ID()` / `Description()` / `Schema()` / `DependsOn()` / `Read()` / `Internal()`）自动实现 `Tool` 接口；`Call()` 直接转发到 `Fn_`
+- 同时实现 `Tools() []Tool`（返回局部 id 置空的自身包装），因此也满足 `Plugin` —— 即"单 tool 容器"，declare 方式与拆分前完全一样
 - 字段后缀 `_` 是 Go 惯例：避免与 getter 方法同名；用户写 `tools.SimplePluginDef{ID_: "..."}` 即可
-- 大多数场景用 `SimplePluginDef` 足够；需要复杂行为（如动态 `Schema`）时直接实现 `Plugin` 接口
+- 大多数场景用 `SimplePluginDef` 足够；需要一个容器挂多个 tool（如 `plugins/localfs`）时，手写一个实现 `Plugin` 的容器类型，`Tools()` 里返回多个 `SimplePluginDef`（或自定义 `Tool` 实现）
+
+**容器级可选能力接口**（每个容器生效一次，不是每个 tool）：
+
+```go
+type StatefulPlugin interface {   // 启动/停止生命周期
+    Plugin
+    StartPlugin(ws Context, cfg any) error
+    StopPlugin() error
+}
+type ReloadablePlugin interface { // 热更新配置
+    Plugin
+    UpdateConfig(cfg any) error
+}
+type ServicePlugin interface {    // 暴露内部服务对象给其它 Go 代码
+    Plugin
+    Service() any
+}
+```
+
+- `AsPlugin(t Tool) Plugin` —— 把裸 `Tool` 包成单 tool 容器；`Register` 内部对裸 `Tool` 自动调用，用户不需要手动包装
+- 裸 `Tool` 若直接实现了 `StartPlugin`/`StopPlugin` 等方法，`Register` 会把 lifecycle target 解析为原始 `Tool` 值本身（不是包装器），这样类型断言和状态都落在用户真正持有的对象上
 
 ### 6.4 `ToolsAPI`
 
@@ -538,37 +608,43 @@ type SimplePluginDef struct {
 type ToolsAPI struct { /* ... */ }
 
 func NewToolsAPI(ws Context) *ToolsAPI
-func (api *ToolsAPI) Register(plugin Plugin) error            // fail-fast: 重名 / 依赖未注册
-func (api *ToolsAPI) Resolve() ([]PluginID, error)           // 拓扑排序 + 环检测
+func (api *ToolsAPI) Register(v any, cfg any) error           // v: 容器 Plugin 或裸 Tool；fail-fast 重名/依赖未注册/校验失败整体回滚
+func (api *ToolsAPI) RegisterAll(plugins []Plugin) error      // 按 DependsOn 拓扑排序，按容器去重，依次 StartPlugin；中途失败反向 StopPlugin 回滚
+func (api *ToolsAPI) Resolve() ([]PluginID, error)            // 拓扑排序 + 环检测
 func (api *ToolsAPI) Call(ctx context.Context, id PluginID, args any) (any, error)
-func (api *ToolsAPI) Tools() []Tool                          // 给 LLM
-func (api *ToolsAPI) Funcs() []Func                          // 给 UI
+func (api *ToolsAPI) Tools() []ToolInfo                        // 给 LLM，过滤 Internal()==true
+func (api *ToolsAPI) Funcs() []Func                            // 给 UI，过滤 Internal()==true
+func (api *ToolsAPI) UpdatePluginConfig(id PluginID, cfg any) error  // 按容器 id 查找 ReloadablePlugin
+func (api *ToolsAPI) Service(id PluginID) (any, error)         // 按容器 id 查找 ServicePlugin
+func (api *ToolsAPI) StopAllPlugins() error                    // 对所有 StatefulPlugin 调 StopPlugin，errors.Join 汇总，不中断
 ```
 
 **行为约定**：
 
-- `Register` —— 立即校验 `DependsOn` 已注册，否则 `error`（fail-fast，不支持 forward ref）
-- `Resolve` —— DFS 拓扑排序，环检测失败返 error；返回所有 plugin 的稳定执行顺序
-- `Call` —— 4 步：permission 门控 → 发 `<id>.start` → 执行 `plugin.Call` → 发 `<id>.done` 或 `<id>.error`
-- `Tools()` / `Funcs()` —— 从同一注册表派生两个视图
+- `Register` —— `v` 可以是容器 `Plugin`，也可以是裸 `Tool`（自动 `AsPlugin` 包装）；立即校验容器 id + 每个 tool 的 full id、校验 `DependsOn` 已注册，否则 `error`（fail-fast，不支持 forward ref）；若 lifecycle target 实现 `StatefulPlugin` 则调 `StartPlugin(ws, cfg)`
+- `RegisterAll` —— 内部按容器维度（不是 tool 维度）拓扑排序和启动，一个容器只 `StartPlugin` 一次
+- `Resolve` —— DFS 拓扑排序（按 full id），环检测失败返 error；返回所有 tool 的稳定执行顺序
+- `Call` —— 按 full id 查找 tool，4 步：permission 门控 → 发 `plugin.<full-id>.start` → 执行 `tool.Call` → 发 `plugin.<full-id>.done` 或 `.error`
+- `Tools()` / `Funcs()` —— 从同一注册表派生两个视图，都过滤 `Internal()==true` 的 tool
+- `UpdatePluginConfig` / `Service` —— 按**容器 id**（不是 tool full id）查找；对多 tool 容器，传任意一个 tool 的 full id 都会找不到，必须传容器 id 本身
 
-### 6.5 `Tool` / `Func` 投影
+### 6.5 `ToolInfo` / `Func` 投影
 
 ```go
-type Tool struct {
-    ID          PluginID
+type ToolInfo struct {
+    ID          PluginID   // full id
     Description string
     Schema      map[string]any
 }
 type Func struct {
-    ID   PluginID
+    ID   PluginID          // full id
     Call func(ctx context.Context, args any) (any, error)  // bound to ws
 }
 ```
 
-- `Tool` 暴露给 LLM（`OpenAI` / `Anthropic` 风格）：`ID` + `Description` + `Schema`
-- `Func` 暴露给 UI（按钮 / 表单）：`ID` + 已 bind `ws` 的 `Call` 函数
-- 两个视图从**同一注册表**派生，零额外注册开销
+- `ToolInfo` 暴露给 LLM（`OpenAI` / `Anthropic` 风格）：`ID`（full id）+ `Description` + `Schema`
+- `Func` 暴露给 UI（按钮 / 表单）：`ID`（full id）+ 已 bind `ws` 的 `Call` 函数
+- 两个视图从**同一注册表**派生，零额外注册开销，且都已过滤 `Internal()==true` 的 tool
 
 ### 6.6 `Workspace`（容器）
 
@@ -581,7 +657,7 @@ v4 的 `Bizmodel` 概念在 v5 中**彻底移除**：
 - 没有 `CreateBizmodel` / `GetBizmodel` / `ListBizModels` / `DeleteBizmodel` 方法
 - 没有 `bizmodel/<wsID>/<id>` 的 meta key
 
-v4 的 Bizmodel 在 v5 中由 plugin 注册表替代 —— 用户的每个能力都直接 `ws.Register(tools.SimplePluginDef{...})`，不再需要先创建容器。
+v4 的 Bizmodel 在 v5 中由 plugin 注册表替代 —— 用户的每个能力都直接 `ws.Register(tools.SimplePluginDef{...}, nil)`，不再需要先创建容器。
 
 ### 6.8 `MetaConfig` + `SqliteConfig` + `MysqlConfig`
 
@@ -607,18 +683,19 @@ const (
 
 ### 6.10 引擎事件约定
 
-**引擎自动发**（在 `Call` 前后）：
-- `plugin.<id>.start` —— `Call` 入口
-- `plugin.<id>.done` —— `Call` 成功
-- `plugin.<id>.error` —— `Call` 失败
+**引擎自动发**（在 `Call` 前后，`<full-id>` = `容器id[.tool局部id]`）：
+- `plugin.<full-id>.start` —— `Call` 入口
+- `plugin.<full-id>.done` —— `Call` 成功
+- `plugin.<full-id>.error` —— `Call` 失败
+- `plugin.<容器id>.config_updated` —— `UpdatePluginConfig` 成功后发（按容器 id，不是 tool full id）
 
-> **带 `plugin.` 前缀** —— 与 LLM 工具名（`<id>` 不带前缀）区分；事件是 engine 内部广播，加 `plugin.` 前缀避免与用户自定义 topic 冲突。
+> **带 `plugin.` 前缀** —— 与 LLM 工具名（full id 不带前缀）区分；事件是 engine 内部广播，加 `plugin.` 前缀避免与用户自定义 topic 冲突。`Internal()==true` 的 tool 被 `Call` 时同样会发这 3 类事件（可见性开关不影响事件行为）。
 
 **permission 询问**（permission 包发）：
 - `permission.ask` —— RAsk / WAsk 模式发到 bus，UI 端 `Handle` 后返 `AskResponse`
 
 **plugin 内部自定义**：
-- `file.changed` / `user.draft.sent` / ... —— plugin 在 `Fn_` 内部可用 `ws.Bus().Publish(...)` 发任何 topic（不带 `plugin.` 前缀，因为不是引擎事件）
+- `file.changed` / `user.draft.sent` / ... —— tool 在 `Call`/`Fn_` 内部，或容器在 `StartPlugin` 启动的后台 goroutine 里，可用 `ws.Bus().Publish(...)` 发任何 topic（不带 `plugin.` 前缀，因为不是引擎事件）；`plugins/localfs` 的文件监听即用此方式发 `file.*` 事件
 
 ---
 
@@ -695,7 +772,7 @@ import (
     "github.com/wyx0k/ndrive/tools"  // SimplePluginDef, PluginID
 )
 
-ws.API().Register(tools.SimplePluginDef{
+ws.Register(tools.SimplePluginDef{
     ID_:          "func.ppt.read",
     Description_: "读取 pptx 并返回文本",
     Schema_:      {"type": "object", "properties": {"path": {"type": "string"}}},
@@ -704,8 +781,10 @@ ws.API().Register(tools.SimplePluginDef{
     Fn_: func(ctx, ws, args) (any, error) {
         // ... 用 ws.Bus() 发事件，用 ws 的 internal meta 存临时数据
     },
-})
+}, nil)
 ```
+
+**裸 `Tool`（`SimplePluginDef`）只是一个 tool。要在一个容器下挂多个 tool（比如一套存储能力的 `list`/`read`/`search`/`stat` + 一个只给内部复用的 `open`），需要手写一个实现 `tools.Plugin` 的容器类型，`Tools()` 返回多个 `Tool`。完整可运行的例子见 `plugins/localfs`（`store.localfs` 容器，`open` 设为 `Internal_: true`）。
 
 ### 8.4 meta 持久化 key 约定
 
@@ -739,8 +818,8 @@ import (
     "github.com/wyx0k/ndrive/tools"  // SimplePluginDef, PluginID
 )
 
-// 1. 用户先写一个本地文件 plugin
-ws.API().Register(tools.SimplePluginDef{
+// 1. 用户先写一个本地文件 plugin（最小单 tool 版本，示意用）
+ws.Register(tools.SimplePluginDef{
     ID_:          "store.localfile.write",
     Description_: "写入文件",
     Schema_:      {...},
@@ -751,7 +830,7 @@ ws.API().Register(tools.SimplePluginDef{
         ws.Bus().Publish("file.changed", map[string]any{"path": a["path"]})
         return nil, nil
     },
-})
+}, nil)
 
 // 2. 调用
 userCtx := ws.Context(ctx)
@@ -761,6 +840,15 @@ ws.API().Call(userCtx, "store.localfile.write", map[string]any{
 ```
 
 **说明 v5 哲学**：v4 把"本地文件"作为内置能力；v5 让"本地文件"成为一个普通 plugin，引擎不关心 plugin 操作什么（文件 / 数据库 / HTTP / 内存都行）。
+
+**生产可用的版本**是 `plugins/localfs`：一个真正的多 tool 容器 `store.localfs`，挂了 `list`/`read`/`search`/`stat`（导出）+ `open`（`Internal_: true`，只给内部/其它 tool 用），并实现 `StatefulPlugin`（启动时开文件监听，发 `file.*` 事件；`StopPlugin` 时关闭）：
+
+```go
+fsPlugin, _ := localfs.NewPlugin("/data/notes")
+ws.Register(fsPlugin, nil)  // 自动走 StartPlugin，开始监听
+
+ws.API().Call(ctx, "store.localfs.list", map[string]any{"path": "/"})
+```
 
 ### 9.2 permission WAsk 询问流程
 
@@ -778,15 +866,17 @@ ToolsAPI.Call:
 ### 9.3 跨 plugin 依赖
 
 ```go
-ws.API().Register(tools.SimplePluginDef{
+ws.Register(tools.SimplePluginDef{
     ID_: "func.ppt.read", DependsOn_: []tools.PluginID{"store.localfile.read"},
     Fn_: func(ctx, ws, args) (any, error) {
         raw, _ := ws.API().Call(ctx, "store.localfile.read", map[string]any{"path": args.(map[string]any)["path"]})
         return parsePPTX(raw.([]byte))
     },
-})
+}, nil)
 // Resolve 返回 ["store.localfile.read", "func.ppt.read"]
 ```
+
+`DependsOn_` 写的是**容器 id**，不是 tool 的 full id。如果依赖的是多 tool 容器里的某一个 tool（比如只想依赖 `store.localfs` 的 `open`），`DependsOn_` 仍然只需要写容器 id `store.localfs`——`Register` 校验的是"容器是否已注册"，不是某个具体 tool。
 
 ---
 

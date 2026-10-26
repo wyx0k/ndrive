@@ -4,9 +4,9 @@
 
 ---
 
-名称灵感来自《高达 UC》中的 NT-D（NewType Destroyer）系统——一套在特定条件下被激活、以极高精度响应意图的驱动系统。NDrive 取其意：在权限触发时精准响应，把业务意图直接驱动到存储层。
+名称灵感来自《高达 UC》中的 NT-D（NewType Destroyer）系统——一套在特定条件下被激活、以极高精度响应意图的驱动系统。NDrive 取其意：在权限触发时精准响应，把业务意图直接驱动到执行层。
 
-树形业务模型存储引擎。把任意业务数据组织成路径树，统一读写、搜索和权限控制。
+一个面向 LLM / Agent 场景的插件注册框架。把任意能力（存储、网络、本地工具……）包装成 plugin 挂到 Workspace 上，统一走权限校验、事件广播，并自动生成 LLM tool schema。
 
 ```
 go get github.com/wyx0k/ndrive
@@ -16,70 +16,72 @@ go get github.com/wyx0k/ndrive
 
 | 概念 | 说明 |
 |---|---|
-| **Workspace** | 独立工作空间，绑定 owner，持有 meta 存储和事件总线 |
-| **Bizmodel** | 业务模型实例，对应一棵树和一个存储 backend |
-| **Tree** | 路径树视图，按路径读取、列举、模糊搜索、删除 |
-| **Op** | backend 提供的原子操作，命名约定 `<subkind>-<动作>` |
-| **Policy** | 四档权限：`RAsk < R < WAsk < W` |
+| **Workspace** | 独立工作空间，绑定 userID，持有 meta 存储、事件总线、权限 Checker 和插件注册中心 |
+| **Plugin** | 插件容器，只负责声明 `ID()` 和挂载的 `Tools()` 列表 |
+| **Tool** | 真正可调用的单元：`Description`/`Schema`/`DependsOn`/`Read`/`Internal` + `Call` |
+| **ToolsAPI** | 插件注册中心：注册、依赖拓扑排序、权限门控调用、LLM/UI 双视图投影 |
+| **Permission** | 四档权限：`RAsk < R < WAsk < W`，按 user 维度配置 |
 | **Bus** | 进程内发布/订阅 + 同步请求通道 |
 
 ## 特性
 
-- **树形结构**：把业务数据组织成路径树，统一读写、搜索和权限控制
-- **多 Backend**：内置 LocalFile、SQLite、BadgerDB，远端 MySQL/MongoDB，自定义扩展
-- **灵活权限**：四档权限模型，支持 `WAsk`/`RAsk` 向外请求确认
-- **事件总线**：进程内 pub/sub，用于 LLM pipeline 和 UI 层挂载
-- **Procedure**：业务层复合操作注册，与 Op 统一暴露给 LLM tool 生成
-
-## 内置 Backend
-
-| 常量 | 存储 |
-|---|---|
-| `BackendLocalFile` | 本地文件系统 |
-| `BackendLocalSQLite` | 本地 SQLite |
-| `BackendLocalBadger` | 本地 BadgerDB |
-| `BackendRemoteSQL` | 远端 SQL（MySQL 等） |
-| `BackendRemoteMongo` | 远端 MongoDB |
+- **Plugin/Tool 二层模型**：一个 Plugin 容器下可以挂多个 Tool（比如一套文件系统能力的 `list`/`read`/`search`/`stat`），也可以用 `Internal()` 把某个 Tool 隐藏成"只给内部复用、不直接暴露给 LLM/UI"
+- **依赖图 + 拓扑排序**：Tool 之间用 `DependsOn` 声明依赖，注册时自动校验、批量注册时自动排序
+- **四档权限模型**：`RAsk`/`R`/`WAsk`/`W`，`WAsk`/`RAsk` 会通过 Bus 向外发起确认请求，适合需要人审的高风险操作
+- **事件总线**：每次 Call 自动广播 `start`/`done`/`error` 生命周期事件，插件内部也能发自定义事件，方便 LLM pipeline 和 UI 层挂载
+- **容器生命周期**：插件可选实现 `StatefulPlugin`（启动/停止）、`ReloadablePlugin`（热更新配置）、`ServicePlugin`（暴露内部服务对象）
+- **开箱即用的本地文件插件**：`plugins/localfs` 提供文件列举/读取/搜索/stat/写入/编辑 + 文件变更监听，可直接注册使用
 
 ## 快速开始
 
 ```go
-import "github.com/wyx0k/ndrive"
+import (
+    "context"
+    "github.com/wyx0k/ndrive"
+    "github.com/wyx0k/ndrive/permission"
+    "github.com/wyx0k/ndrive/tools"
+)
 
 ctx := context.Background()
 
-ws, err := ntd.OpenWorkspace(ctx, "ws-1", "owner-alice", ntd.Config{
-    Meta: ntd.SqliteConfig{Path: "./meta.db"},
+ws, err := ndrive.OpenWorkspace(ctx, "demo", "alice", ndrive.WorkspaceConfig{
+    WorkerID: 1,
+    Meta:     ndrive.SqliteConfig{Path: "./meta.db"},
 })
+if err != nil {
+    // ...
+}
 defer ws.Close()
 
-bm, err := ws.CreateBizmodel(ctx, ntd.BizmodelOpts{
-    ID:       "notes",
-    TypeName: ntd.BackendLocalFile,
-    Config:   ntd.LocalFileConfig{RootDir: "./notes"},
-})
+// 注册一个最简单的 plugin（裸 Tool，自动包装成单 tool 容器）
+ws.Register(tools.SimplePluginDef{
+    ID_:          "util.echo",
+    Description_: "原样返回 args",
+    Read_:        true,
+    Fn_: func(ctx context.Context, ws tools.Context, args any) (any, error) {
+        return args, nil
+    },
+}, nil)
 
-ws.SetPolicy(ctx, ntd.W)
-ownerCtx := ws.Context(ctx)
-
-bm.Call(ownerCtx, "dir-mkdir", "/2024", nil)
-bm.Call(ownerCtx, "file-fm-write", "/2024/note.md", map[string]any{
-    "withfm": true,
-    "fm":     map[string]any{"title": "My Note"},
-    "body":   "# My Note\n\nHello.",
-})
-
-briefs, _ := bm.Tree().ListWithBrief(ownerCtx, "/2024")
-results, _ := bm.Tree().Search(ownerCtx, "*note*")
+// 授权后调用
+ws.SetPolicy(ctx, "alice", permission.W)
+result, _ := ws.API().Call(ctx, "util.echo", "hello")
 ```
+
+多 tool 容器（一个 Plugin 挂多个 Tool，并带启动/停止生命周期）直接参考 `plugins/localfs`：
+
+```go
+import "github.com/wyx0k/ndrive/plugins/localfs"
+
+fsPlugin, _ := localfs.NewPlugin("/data/notes")
+ws.Register(fsPlugin, nil) // 自动触发 StartPlugin，开始监听文件变更
+
+entries, _ := ws.API().Call(ctx, "store.localfs.list", map[string]any{"path": "/"})
+```
+
+更完整的可运行示例见 [`examples/local/basic_workspace`](examples/local/basic_workspace/main.go)（Workspace 生命周期）和 [`examples/local/permission`](examples/local/permission/main.go)（权限审批流程）。
 
 ## 文档
 
-详细文档见 [docs/](docs/) 目录：
-
-- [快速上手](docs/getting-started.md)
-- [架构说明](docs/architecture.md)
-- [Backend 扩展](docs/backend.md)
-- [事件总线](docs/bus.md)
-- [Procedure](docs/procedure.md)
-- [下游接入示例](docs/integration.md)
+- [架构说明](ARCHITECTURE.md)
+- [实施 Specs](SPECS.md)

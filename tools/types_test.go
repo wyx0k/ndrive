@@ -8,7 +8,9 @@ import (
 	"github.com/wyx0k/ndrive/tools"
 )
 
-// 编译期断言：SimplePluginDef 实现 Plugin 接口。
+// 编译期断言：SimplePluginDef 同时实现 Tool（单个可调用单元）和 Plugin
+// （单 tool 容器，容器 id = ID_）。
+var _ tools.Tool = tools.SimplePluginDef{}
 var _ tools.Plugin = tools.SimplePluginDef{}
 
 // --- PluginID.Validate ---
@@ -39,10 +41,10 @@ func TestPluginIDValidate(t *testing.T) {
 	}
 }
 
-// --- SimplePluginDef implements Plugin ---
+// --- SimplePluginDef implements Tool ---
 
 func TestSimplePluginDefImplementsPlugin(t *testing.T) {
-	// 用一个最小 def 跑一遍 6 个 getter
+	// 用一个最小 def 跑一遍 7 个 getter
 	def := tools.SimplePluginDef{
 		ID_:          "util.echo",
 		Description_: "echo back",
@@ -53,7 +55,7 @@ func TestSimplePluginDefImplementsPlugin(t *testing.T) {
 			return args, nil
 		},
 	}
-	var p tools.Plugin = def
+	var p tools.Tool = def
 	if p.ID() != "util.echo" {
 		t.Errorf("ID: %q", p.ID())
 	}
@@ -62,6 +64,9 @@ func TestSimplePluginDefImplementsPlugin(t *testing.T) {
 	}
 	if p.Read() != true {
 		t.Error("Read: false")
+	}
+	if p.Internal() != false {
+		t.Error("Internal: want false (default exported)")
 	}
 	if len(p.DependsOn()) != 1 || p.DependsOn()[0] != "store.userdb.read" {
 		t.Errorf("DependsOn: %v", p.DependsOn())
@@ -118,7 +123,8 @@ func TestSimplePluginDefFieldNames(t *testing.T) {
 	}
 }
 
-// --- 用户也可以手写 Plugin 接口（不一定用 SimplePluginDef） ---
+// --- 用户也可以手写 Tool 接口（不一定用 SimplePluginDef）；Register 会自动
+// 把裸 Tool 包装成单 tool Plugin 容器 ---
 
 type manualPlugin struct {
 	id    tools.PluginID
@@ -126,19 +132,20 @@ type manualPlugin struct {
 	calls int
 }
 
-func (m *manualPlugin) ID() tools.PluginID                 { return m.id }
-func (m *manualPlugin) Description() string                { return "manual" }
-func (m *manualPlugin) Schema() map[string]any             { return nil }
-func (m *manualPlugin) DependsOn() []tools.PluginID        { return nil }
-func (m *manualPlugin) Read() bool                        { return m.read }
+func (m *manualPlugin) ID() tools.PluginID          { return m.id }
+func (m *manualPlugin) Description() string         { return "manual" }
+func (m *manualPlugin) Schema() map[string]any      { return nil }
+func (m *manualPlugin) DependsOn() []tools.PluginID { return nil }
+func (m *manualPlugin) Read() bool                  { return m.read }
+func (m *manualPlugin) Internal() bool              { return false }
 func (m *manualPlugin) Call(ctx context.Context, ws tools.Context, args any) (any, error) {
 	m.calls++
 	return nil, nil
 }
 
 func TestManualPlugin(t *testing.T) {
-	// 编译期：*manualPlugin 实现 Plugin
-	var _ tools.Plugin = (*manualPlugin)(nil)
+	// 编译期：*manualPlugin 实现 Tool
+	var _ tools.Tool = (*manualPlugin)(nil)
 	p := &manualPlugin{id: "custom.thing", read: true}
 	if p.ID() != "custom.thing" {
 		t.Errorf("ID: %q", p.ID())
@@ -168,16 +175,16 @@ func TestSimplePluginDefCallError(t *testing.T) {
 	}
 }
 
-// --- Tool / Func 投影类型是值类型（不可 nil） ---
+// --- ToolInfo / Func 投影类型是值类型（不可 nil） ---
 
 func TestToolProjection(t *testing.T) {
-	tool := tools.Tool{
+	info := tools.ToolInfo{
 		ID:          "util.echo",
 		Description: "echo",
 		Schema:      map[string]any{"type": "object"},
 	}
-	if tool.ID != "util.echo" || tool.Description != "echo" {
-		t.Error("Tool fields wrong")
+	if info.ID != "util.echo" || info.Description != "echo" {
+		t.Error("ToolInfo fields wrong")
 	}
 }
 

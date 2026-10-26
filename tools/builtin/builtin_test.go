@@ -16,13 +16,18 @@ func TestEchoMetadata(t *testing.T) {
 	if p.ID() != "util.echo" {
 		t.Errorf("ID: %q", p.ID())
 	}
-	if p.Description() == "" {
+	tl := p.Tools()
+	if len(tl) != 1 {
+		t.Fatalf("want 1 tool, got %d", len(tl))
+	}
+	tool := tl[0]
+	if tool.Description() == "" {
 		t.Error("Description should be non-empty")
 	}
-	if !p.Read() {
+	if !tool.Read() {
 		t.Error("Echo should be Read=true")
 	}
-	if p.Schema() == nil {
+	if tool.Schema() == nil {
 		t.Error("Schema should be non-nil")
 	}
 }

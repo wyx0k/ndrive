@@ -29,11 +29,13 @@ type CallEvent struct {
 	Time     time.Time `json:"time"`
 }
 
-// Call 触发一个 plugin。
-// 失败可能来源：plugin 未注册 / permission 拒绝 / plugin 自身返错。
+// Call 触发一个 tool（按完整 id）。
+// 失败可能来源：tool 未注册 / permission 拒绝 / tool 自身返错。
+// 对 Internal() == true 的 tool 同样有效——Internal 只影响 Tools()/Funcs()
+// 的可见性，不影响能否被 Call（供其他 plugin 内部调用）。
 func (a *ToolsAPI) Call(ctx context.Context, id PluginID, args any) (any, error) {
 	a.mu.RLock()
-	p, ok := a.plugins[id]
+	p, ok := a.tools[id]
 	a.mu.RUnlock()
 	if !ok {
 		return nil, fmt.Errorf("%w: %s", ErrPluginNotFound, id)
@@ -69,18 +71,19 @@ func (a *ToolsAPI) Call(ctx context.Context, id PluginID, args any) (any, error)
 	return result, nil
 }
 
-// UpdatePluginConfig 运行中更新一个 plugin 的配置。
+// UpdatePluginConfig 运行中更新一个 plugin 容器的配置（按容器 id，不是
+// tool 完整 id——单 tool 容器时两者相同）。
 // plugin 必须实现 ReloadablePlugin，否则返 error。
-// 更新成功后发 `plugin.<id>.config_updated` 事件（payload: CallEvent{Args: cfg}）；
+// 更新成功后发 `plugin.<容器id>.config_updated` 事件（payload: CallEvent{Args: cfg}）；
 // 更新失败不发事件。
 func (a *ToolsAPI) UpdatePluginConfig(id PluginID, cfg any) error {
 	a.mu.RLock()
-	p, ok := a.plugins[id]
+	target, ok := a.lifecycleTargets[id]
 	a.mu.RUnlock()
 	if !ok {
 		return fmt.Errorf("%w: %s", ErrPluginNotFound, id)
 	}
-	cp, ok := p.(ReloadablePlugin)
+	cp, ok := target.(hasUpdateConfig)
 	if !ok {
 		return fmt.Errorf("tools: plugin %s does not implement ReloadablePlugin", id)
 	}
@@ -91,34 +94,59 @@ func (a *ToolsAPI) UpdatePluginConfig(id PluginID, cfg any) error {
 	return nil
 }
 
-// Tools 返 LLM 视角的 plugin 列表（按 id 字典序）。
+// Service 返回已注册 plugin 容器暴露的原生能力（ServicePlugin.Service()），
+// 按容器 id 查找（单 tool 容器时容器 id 就是 tool 的完整 id）。
+// 用于 plugin 间高频/流式协作，跳过 Call 的 schema/permission/事件通道。
+// 调用方通常在自己的 DependsOn_ 声明依赖该 id，Register 阶段已保证其存在，
+// 这里只做查找 + 接口断言。
+func (a *ToolsAPI) Service(id PluginID) (any, error) {
+	a.mu.RLock()
+	target, ok := a.lifecycleTargets[id]
+	a.mu.RUnlock()
+	if !ok {
+		return nil, fmt.Errorf("%w: %s", ErrPluginNotFound, id)
+	}
+	sp, ok := target.(hasService)
+	if !ok {
+		return nil, fmt.Errorf("%w: %s", ErrPluginNoService, id)
+	}
+	return sp.Service(), nil
+}
+
+// Tools 返 LLM 视角的 tool 列表（按完整 id 字典序），排除 Internal() == true 的 tool。
 // 字段是只读快照；不能用于实际调用。
-func (a *ToolsAPI) Tools() []Tool {
+func (a *ToolsAPI) Tools() []ToolInfo {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
-	ids := make([]PluginID, 0, len(a.plugins))
-	for id := range a.plugins {
+	ids := make([]PluginID, 0, len(a.tools))
+	for id := range a.tools {
 		ids = append(ids, id)
 	}
 	sort.Strings(ids)
-	out := make([]Tool, 0, len(ids))
+	out := make([]ToolInfo, 0, len(ids))
 	for _, id := range ids {
-		p := a.plugins[id]
-		out = append(out, Tool{
-			ID:          p.ID(),
-			Description: p.Description(),
-			Schema:      p.Schema(),
+		t := a.tools[id]
+		if t.Internal() {
+			continue
+		}
+		out = append(out, ToolInfo{
+			ID:          id,
+			Description: t.Description(),
+			Schema:      t.Schema(),
 		})
 	}
 	return out
 }
 
-// Funcs 返 UI 视角的 plugin 列表（按 id 字典序）。
+// Funcs 返 UI 视角的 tool 列表（按完整 id 字典序），排除 Internal() == true 的 tool。
 // 每个 Func.Call 已 bind 到当前 api，可直接调用（permission 门控仍走 api.Call）。
 func (a *ToolsAPI) Funcs() []Func {
 	a.mu.RLock()
-	ids := make([]PluginID, 0, len(a.plugins))
-	for id := range a.plugins {
+	ids := make([]PluginID, 0, len(a.tools))
+	for id, t := range a.tools {
+		if t.Internal() {
+			continue
+		}
 		ids = append(ids, id)
 	}
 	a.mu.RUnlock()
