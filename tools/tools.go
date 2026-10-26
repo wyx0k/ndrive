@@ -145,10 +145,6 @@ type Tool interface {
 	// Schema JSON Schema，描述 args 结构（LLM 生成参数用）。
 	Schema() map[string]any
 
-	// DependsOn 声明本 tool 依赖的其他已注册 tool 的完整 id。
-	// Register 时所有 DependsOn 必须已注册（fail-fast，不支持 forward ref）。
-	DependsOn() []PluginID
-
 	// Read true 表示本 tool 是只读操作（不触发 permission 询问）。
 	Read() bool
 
@@ -175,6 +171,20 @@ type Plugin interface {
 
 	// Tools 返回本插件包含的所有 Tool。
 	Tools() []Tool
+}
+
+// DependentPlugin 是可选接口，供需要声明跨插件依赖的 Plugin 实现。这是
+// Plugin（容器）级别的接口，不是 Tool 级别——一个容器下所有 Tool 共享同一份
+// 依赖声明，不支持"容器内某个 tool 依赖 A，另一个 tool 依赖 B"这种细粒度。
+//
+// Register/RegisterAll 时，若 plugin 实现了 DependentPlugin，会校验 DependsOn()
+// 里的每个容器 id 必须已注册（fail-fast，不支持 forward ref）；未实现该接口的
+// Plugin 视为没有依赖。RegisterAll 按容器级别做拓扑排序 + 环检测。
+type DependentPlugin interface {
+	Plugin
+
+	// DependsOn 声明本容器依赖的其他容器 id（Plugin.ID()，不是 tool 的完整 id）。
+	DependsOn() []PluginID
 }
 
 // StatefulPlugin 是可选接口，供有内部状态/后台资源的 Plugin（如文件系统监听、
@@ -238,31 +248,33 @@ type ServicePlugin interface {
 }
 
 // SimplePluginDef 是声明式描述单个 Tool 的 helper struct。
-// 让用户免手写 7 个 getter，直接当 struct 用。
-// 字段名加下划线后缀（ID_ / Description_ / ...）以避免和 Tool 接口的 getter 冲突。
+// 让用户免手写方法，直接当 struct 用。
+// 字段名加下划线后缀（ID_ / Description_ / ...）以避免和 Tool/Plugin 接口的 getter 冲突。
 //
-// SimplePluginDef 同时实现 Tool 和 Plugin 两个接口：作为 Plugin，它是一个只
-// 含自己这一个 tool 的容器，容器 id 就是 ID_；作为 Tool，它是容器内那一个
-// tool。这样 `ws.Register(tools.SimplePluginDef{ID_: "util.echo", ...}, nil)`
-// 和 `[]tools.Plugin{tools.SimplePluginDef{...}, ...}` 两种写法都和旧版本
+// SimplePluginDef 同时实现 Tool 和 Plugin（含 DependentPlugin）三个接口：作为
+// Plugin，它是一个只含自己这一个 tool 的容器，容器 id 就是 ID_，DependsOn_
+// 声明的是这个容器依赖的其他容器 id；作为 Tool，它是容器内那一个 tool。这样
+// `ws.Register(tools.SimplePluginDef{ID_: "util.echo", ...}, nil)` 和
+// `[]tools.Plugin{tools.SimplePluginDef{...}, ...}` 两种写法都和旧版本
 // 完全一致，不需要改动调用方。
 type SimplePluginDef struct {
 	ID_          PluginID
 	Description_ string
 	Schema_      map[string]any
-	DependsOn_   []PluginID
-	Read_        bool
+	// DependsOn_ 声明本容器依赖的其他容器 id（不是 tool 的完整 id）；单 tool
+	// 容器场景下容器 id 就是 ID_ 本身，和旧版本写法兼容。
+	DependsOn_ []PluginID
+	Read_      bool
 	// Internal_ true 表示不出现在 Tools()/Funcs()，但仍可被 Call。默认 false（导出）。
 	Internal_ bool
 	Fn_       func(ctx context.Context, ws Context, args any) (any, error)
 }
 
-// 7 个 getter，自动实现 Tool 接口
+// 自动实现 Tool 接口的 getter
 
 func (s SimplePluginDef) ID() PluginID           { return s.ID_ }
 func (s SimplePluginDef) Description() string    { return s.Description_ }
 func (s SimplePluginDef) Schema() map[string]any { return s.Schema_ }
-func (s SimplePluginDef) DependsOn() []PluginID  { return s.DependsOn_ }
 func (s SimplePluginDef) Read() bool             { return s.Read_ }
 func (s SimplePluginDef) Internal() bool         { return s.Internal_ }
 func (s SimplePluginDef) Call(ctx context.Context, ws Context, args any) (any, error) {
@@ -271,6 +283,9 @@ func (s SimplePluginDef) Call(ctx context.Context, ws Context, args any) (any, e
 	}
 	return s.Fn_(ctx, ws, args)
 }
+
+// DependsOn 让 SimplePluginDef 同时满足 DependentPlugin（容器级别依赖声明）。
+func (s SimplePluginDef) DependsOn() []PluginID { return s.DependsOn_ }
 
 // Tools 让 SimplePluginDef 同时满足 Plugin 接口：返回只含自己的单 tool 列表，
 // tool 侧 ID() 返回空字符串，于是完整 id = 容器 id = s.ID_，不做额外拼接。

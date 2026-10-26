@@ -303,12 +303,17 @@ type Plugin interface {
     Tools() []Tool
 }
 
+// DependentPlugin 可选接口：容器级别的依赖声明（未实现视为无依赖）
+type DependentPlugin interface {
+    Plugin
+    DependsOn() []PluginID   // 依赖的其它容器 id，不是 tool 的 full id
+}
+
 // Tool 可调用单元接口：真正承担 Call/Schema/权限等职责
 type Tool interface {
     ID() string              // 容器内局部 id；单 tool 容器可返回 ""（代表"我就是 full id"）
     Description() string
     Schema() map[string]any
-    DependsOn() []PluginID   // 依赖的其它容器 id
     Read() bool
     Internal() bool          // true：从 Tools()/Funcs() 投影隐藏，但仍可被 Call(fullID) 调用
     Call(ctx context.Context, ws Context, args any) (any, error)
@@ -318,12 +323,12 @@ type Tool interface {
 func fullToolID(containerID PluginID, toolID string) PluginID
 
 // SimplePluginDef helper struct（声明式描述一个裸 tool）
-// 同时实现 Tool（7 个 getter）和 Plugin（Tools() 返回包装后的自身）—— 即"单 tool 容器"
+// 同时实现 Tool、Plugin（Tools() 返回包装后的自身）和 DependentPlugin —— 即"单 tool 容器"
 type SimplePluginDef struct {
     ID_          PluginID
     Description_ string
     Schema_      map[string]any
-    DependsOn_   []PluginID
+    DependsOn_   []PluginID   // 容器级别依赖；单 tool 容器场景下容器 id 就是 ID_
     Read_        bool
     Internal_    bool
     Fn_          func(ctx context.Context, ws Context, args any) (any, error)
@@ -544,19 +549,25 @@ type Plugin interface {
     Tools() []Tool
 }
 
+// DependentPlugin：可选接口，容器级别依赖声明（未实现视为无依赖）
+type DependentPlugin interface {
+    Plugin
+    DependsOn() []PluginID          // 依赖的其他容器 id，不是 tool 的 full id
+}
+
 // Tool：可调用单元，承担原来单层 Plugin 的全部职责
 type Tool interface {
     ID() string                     // 容器内局部 id；""表示"我就是容器的 full id"（单 tool 容器）
     Description() string
     Schema() map[string]any         // JSON Schema
-    DependsOn() []PluginID          // 依赖的其他容器
     Read() bool                     // true = 读，不触发 permission 询问
     Internal() bool                 // true = 从 Tools()/Funcs() 隐藏，但仍可 Call(fullID)
     Call(ctx context.Context, ws Context, args any) (any, error)
 }
 ```
 
-- 为什么拆成两层：单层 `Plugin` 无法表达"一个容器下挂多个 tool"（如本地文件系统的 `list`/`read`/`search`/`stat`/`open`），也无法表达"内部 tool"（想被其它 tool 通过 `DependsOn` 间接复用，但不想直接暴露给 LLM/UI）
+- 为什么拆成两层：单层 `Plugin` 无法表达"一个容器下挂多个 tool"（如本地文件系统的 `list`/`read`/`search`/`stat`/`open-stream`），也无法表达"内部 tool"（只想被其它 tool 通过 `ToolsAPI.Call(fullID)` 间接复用，不想直接暴露给 LLM/UI）
+- `DependsOn` 是**容器级别**的可选接口（`DependentPlugin`），不是 `Tool` 的方法——一个容器下所有 tool 共享同一份依赖声明，依赖图的节点是容器 id
 - `Read() bool` 必须显式声明，permission 据此走读/写分支
 - `Internal() bool` 默认 `false`；是**可见性**开关，不是**可调用性**开关 —— `Internal()==true` 的 tool 永远可以被 `ToolsAPI.Call(ctx, fullID, args)` 正常调用，只是不出现在 `Tools()`/`Funcs()` 投影里
 - `Schema()` 返回的 JSON Schema 同时用于 LLM tool 生成（`ToolInfo` 视图）和 UI 渲染（`Func` 视图）
@@ -569,14 +580,14 @@ type SimplePluginDef struct {
     ID_          PluginID
     Description_ string
     Schema_      map[string]any
-    DependsOn_   []PluginID
+    DependsOn_   []PluginID   // 容器级别依赖；单 tool 容器场景下容器 id 就是 ID_
     Read_        bool
     Internal_    bool
     Fn_          func(ctx context.Context, ws Context, args any) (any, error)
 }
 ```
 
-- 7 个 getter（`ID()` / `Description()` / `Schema()` / `DependsOn()` / `Read()` / `Internal()`）自动实现 `Tool` 接口；`Call()` 直接转发到 `Fn_`
+- getter（`ID()` / `Description()` / `Schema()` / `Read()` / `Internal()`）自动实现 `Tool` 接口，`DependsOn()` 实现 `DependentPlugin`；`Call()` 直接转发到 `Fn_`
 - 同时实现 `Tools() []Tool`（返回局部 id 置空的自身包装），因此也满足 `Plugin` —— 即"单 tool 容器"，declare 方式与拆分前完全一样
 - 字段后缀 `_` 是 Go 惯例：避免与 getter 方法同名；用户写 `tools.SimplePluginDef{ID_: "..."}` 即可
 - 大多数场景用 `SimplePluginDef` 足够；需要一个容器挂多个 tool（如 `plugins/localfs`）时，手写一个实现 `Plugin` 的容器类型，`Tools()` 里返回多个 `SimplePluginDef`（或自定义 `Tool` 实现）
@@ -876,7 +887,7 @@ ws.Register(tools.SimplePluginDef{
 // Resolve 返回 ["store.localfile.read", "func.ppt.read"]
 ```
 
-`DependsOn_` 写的是**容器 id**，不是 tool 的 full id。如果依赖的是多 tool 容器里的某一个 tool（比如只想依赖 `store.localfs` 的 `open`），`DependsOn_` 仍然只需要写容器 id `store.localfs`——`Register` 校验的是"容器是否已注册"，不是某个具体 tool。
+`DependsOn_`（底层是 `DependentPlugin.DependsOn()`）写的是**容器 id**，不是 tool 的 full id。如果依赖的是多 tool 容器里的某一个 tool（比如只想依赖 `store.localfs` 的 `open-stream`），`DependsOn_` 仍然只需要写容器 id `store.localfs`——`Register` 校验的是"容器是否已注册"，不是某个具体 tool；没实现 `DependentPlugin` 的容器（如 `store.localfs` 本身目前）视为没有依赖。
 
 ---
 

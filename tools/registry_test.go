@@ -52,12 +52,11 @@ type stubTool struct {
 	fn       func(ctx context.Context, ws tools.Context, args any) (any, error)
 }
 
-func (t *stubTool) ID() string                  { return t.id }
-func (t *stubTool) Description() string         { return t.id + " desc" }
-func (t *stubTool) Schema() map[string]any      { return map[string]any{"type": "object"} }
-func (t *stubTool) DependsOn() []tools.PluginID { return nil }
-func (t *stubTool) Read() bool                  { return t.read }
-func (t *stubTool) Internal() bool              { return t.internal }
+func (t *stubTool) ID() string             { return t.id }
+func (t *stubTool) Description() string    { return t.id + " desc" }
+func (t *stubTool) Schema() map[string]any { return map[string]any{"type": "object"} }
+func (t *stubTool) Read() bool             { return t.read }
+func (t *stubTool) Internal() bool         { return t.internal }
 func (t *stubTool) Call(ctx context.Context, ws tools.Context, args any) (any, error) {
 	if t.fn != nil {
 		return t.fn(ctx, ws, args)
@@ -71,6 +70,7 @@ func (t *stubTool) Call(ctx context.Context, ws tools.Context, args any) (any, e
 type multiToolStub struct {
 	cid         tools.PluginID
 	toolList    []tools.Tool
+	dependsOn   []tools.PluginID
 	cfg         any
 	updateErr   error
 	updateCalls int
@@ -85,6 +85,10 @@ func (m *multiToolStub) ID() tools.PluginID { return m.cid }
 func (m *multiToolStub) Tools() []tools.Tool {
 	return m.toolList
 }
+
+// DependsOn 让 multiToolStub 可选实现 DependentPlugin：验证容器级别依赖
+// 覆盖多 tool 容器（所有 tool 共享同一份依赖声明）的场景。
+func (m *multiToolStub) DependsOn() []tools.PluginID { return m.dependsOn }
 
 func (m *multiToolStub) UpdateConfig(cfg any) error {
 	m.updateCalls++
@@ -192,6 +196,75 @@ func TestRegisterDepRegistered(t *testing.T) {
 		dependsOn: []tools.PluginID{"store.db.read"},
 	}, nil); err != nil {
 		t.Fatalf("Register with dep: %v", err)
+	}
+}
+
+// TestRegisterContainerLevelDepMultiTool 验证 DependsOn 是容器级别的：一个
+// 真正的多 tool 容器（store.fs，有 read/write 两个 tool，谁都没有单独声明
+// 依赖）整体依赖 store.db.read；缺依赖时注册失败，满足依赖后两个 tool 都注册成功。
+func TestRegisterContainerLevelDepMultiTool(t *testing.T) {
+	api := newAPI()
+	fs := &multiToolStub{
+		cid: "store.fs",
+		toolList: []tools.Tool{
+			&stubTool{id: "read", read: true},
+			&stubTool{id: "write", read: false},
+		},
+		dependsOn: []tools.PluginID{"store.db.read"},
+	}
+
+	if err := api.Register(fs, nil); !errors.Is(err, tools.ErrPluginNotFound) {
+		t.Fatalf("want ErrPluginNotFound (dep missing), got %v", err)
+	}
+
+	_ = api.Register(&stubPlugin{id: "store.db.read"}, nil)
+	if err := api.Register(fs, nil); err != nil {
+		t.Fatalf("Register after dep satisfied: %v", err)
+	}
+
+	if _, err := api.Call(context.Background(), "store.fs.read", nil); err != nil {
+		t.Errorf("store.fs.read should be callable: %v", err)
+	}
+	if _, err := api.Call(context.Background(), "store.fs.write", nil); err != nil {
+		t.Errorf("store.fs.write should be callable: %v", err)
+	}
+}
+
+// TestResolveContainerLevelMultiTool 验证 Resolve 按容器 id（不是 tool 完整
+// id）返回拓扑顺序：多 tool 容器的依赖只需要出现一次，不会按 tool 数量重复。
+func TestResolveContainerLevelMultiTool(t *testing.T) {
+	api := newAPI()
+	_ = api.Register(&stubPlugin{id: "store.db.read"}, nil)
+	_ = api.Register(&multiToolStub{
+		cid: "store.fs",
+		toolList: []tools.Tool{
+			&stubTool{id: "read", read: true},
+			&stubTool{id: "write", read: false},
+		},
+		dependsOn: []tools.PluginID{"store.db.read"},
+	}, nil)
+
+	order, err := api.Resolve()
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if len(order) != 2 {
+		t.Fatalf("want 2 container ids in order, got %v", order)
+	}
+	dbIdx, fsIdx := -1, -1
+	for i, id := range order {
+		switch id {
+		case "store.db.read":
+			dbIdx = i
+		case "store.fs":
+			fsIdx = i
+		}
+	}
+	if dbIdx == -1 || fsIdx == -1 {
+		t.Fatalf("want both container ids in order, got %v", order)
+	}
+	if dbIdx > fsIdx {
+		t.Errorf("want store.db.read before store.fs, got order %v", order)
 	}
 }
 

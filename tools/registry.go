@@ -1,9 +1,11 @@
 // Registry 实现：Register / RegisterAll / Resolve。
 //
 // v5 行为约定：
-//   - Register 立即校验 id 合法 + 不重名 + 所有 DependsOn 已注册（fail-fast）
-//   - RegisterAll 接收一组 plugin，按 DependsOn 拓扑排序后逐个 Register
-//   - Resolve 用 DFS 拓扑排序 + 环检测，返环路径（依赖在前，执行顺序）
+//   - DependsOn 是容器（Plugin）级别的依赖声明（见 DependentPlugin），不是
+//     Tool 级别：一个容器下所有 Tool 共享同一份依赖，依赖图的节点是容器 id
+//   - Register 立即校验 id 合法 + 不重名 + 所有 DependsOn（容器 id）已注册（fail-fast）
+//   - RegisterAll 接收一组 plugin，按 DependsOn 对容器做拓扑排序后逐个 Register
+//   - Resolve 用 DFS 拓扑排序 + 环检测，返回容器 id 的执行顺序（依赖在前）
 //   - 错误：ErrPluginNotFound / ErrPluginDuplicate / ErrPluginInvalid / ErrPluginCycle
 //   - CycleError 是 typed error，Wrap 到 ErrPluginCycle
 package tools
@@ -12,7 +14,6 @@ import (
 	"errors"
 	"fmt"
 	"sort"
-	"strings"
 )
 
 // 公共错误。
@@ -87,6 +88,16 @@ type hasService interface {
 	Service() any
 }
 
+// containerDependsOn 返回容器声明的依赖（容器 id 列表）。
+// plugin 未实现 DependentPlugin 时视为没有依赖。
+func containerDependsOn(plugin Plugin) []PluginID {
+	dp, ok := plugin.(DependentPlugin)
+	if !ok {
+		return nil
+	}
+	return dp.DependsOn()
+}
+
 // containerTools 展开一个容器的所有 tool，校验 id 合法性，返回 完整id -> Tool。
 func containerTools(plugin Plugin) (map[PluginID]Tool, error) {
 	containerID := plugin.ID()
@@ -112,7 +123,8 @@ func containerTools(plugin Plugin) (map[PluginID]Tool, error) {
 }
 
 // Register 注册一个 plugin（容器）或裸 Tool（自动包装成单 tool 容器）。
-// 校验顺序：容器 id + 各 tool 完整 id 合法 → 不重名 → 所有 DependsOn 已注册。
+// 校验顺序：容器 id + 各 tool 完整 id 合法 → 不重名 → 容器的 DependsOn（若实现
+// DependentPlugin）已注册。
 // 若 plugin 实现了 StatefulPlugin，校验通过后用 cfg 作为初始配置调 StartPlugin
 // （不需要初始配置传 nil）。失败时 registry 不变（不部分修改）。
 func (a *ToolsAPI) Register(v any, cfg any) error {
@@ -137,12 +149,10 @@ func (a *ToolsAPI) Register(v any, cfg any) error {
 			return fmt.Errorf("%w: %s", ErrPluginDuplicate, full)
 		}
 	}
-	// 所有依赖必须已注册（forward ref 禁止；Spec 3 walkthrough 决定 C）
-	for full, t := range newTools {
-		for _, dep := range t.DependsOn() {
-			if _, ok := a.tools[dep]; !ok {
-				return fmt.Errorf("%w: %s (needed by %s)", ErrPluginNotFound, dep, full)
-			}
+	// 容器依赖必须已注册（forward ref 禁止；Spec 3 walkthrough 决定 C）
+	for _, dep := range containerDependsOn(plugin) {
+		if _, ok := a.containers[dep]; !ok {
+			return fmt.Errorf("%w: %s (needed by %s)", ErrPluginNotFound, dep, containerID)
 		}
 	}
 	if sp, ok := lifecycleTarget.(hasStartStop); ok {
@@ -159,7 +169,7 @@ func (a *ToolsAPI) Register(v any, cfg any) error {
 }
 
 // RegisterAll 批量注册一组 plugin（容器）或裸 Tool（自动包装）：先校验所有
-// tool 的依赖（含已注册 + 输入列表内），然后按 DependsOn 拓扑排序，最后
+// 容器的依赖（含已注册 + 输入列表内），然后按 DependsOn 对容器拓扑排序，最后
 // 按序启动 StatefulPlugin 并 commit。
 //
 // 失败语义：要么全部注册成功，要么维持调用前状态。
@@ -209,40 +219,28 @@ func (a *ToolsAPI) RegisterAll(plugins []Plugin) error {
 		}
 	}
 
-	// 第二步：校验所有依赖（依赖要么在 tempTools 内，要么已注册）
-	for full, t := range tempTools {
-		for _, dep := range t.DependsOn() {
-			if _, ok := tempTools[dep]; ok {
+	// 第二步：校验所有容器依赖（依赖要么在 tempContainers 内，要么已注册）
+	for cid, p := range tempContainers {
+		for _, dep := range containerDependsOn(p) {
+			if _, ok := tempContainers[dep]; ok {
 				continue
 			}
-			if _, ok := a.tools[dep]; ok {
+			if _, ok := a.containers[dep]; ok {
 				continue
 			}
-			return fmt.Errorf("%w: %s (needed by %s)", ErrPluginNotFound, dep, full)
+			return fmt.Errorf("%w: %s (needed by %s)", ErrPluginNotFound, dep, cid)
 		}
 	}
 
-	// 第三步：拓扑排序（含环检测），按完整 tool id 排序
-	order, err := topoSort(tempTools)
+	// 第三步：按容器 id 拓扑排序（含环检测）
+	containerOrder, err := topoSortContainers(tempContainers)
 	if err != nil {
 		return err
 	}
 
-	// 第四步：按容器首次出现的拓扑顺序启动 StatefulPlugin（cfg 传 nil，批量
-	// 注册不支持 per-plugin 初始配置，需要初始配置的 plugin 请用
-	// Register(plugin, cfg) 单独注册）；某个失败则回滚已启动的，batch 整体
-	// 失败不 commit。一个容器只启动一次，即使它有多个 tool 出现在 order 里。
-	containerOrder := make([]PluginID, 0, len(tempContainers))
-	seen := make(map[PluginID]bool, len(tempContainers))
-	for _, full := range order {
-		cid := containerIDOf(tempTools, tempContainers, full)
-		if cid == "" || seen[cid] {
-			continue
-		}
-		seen[cid] = true
-		containerOrder = append(containerOrder, cid)
-	}
-
+	// 第四步：按拓扑顺序启动 StatefulPlugin（cfg 传 nil，批量注册不支持
+	// per-plugin 初始配置，需要初始配置的 plugin 请用 Register(plugin, cfg)
+	// 单独注册）；某个失败则回滚已启动的，batch 整体失败不 commit。
 	started := make([]hasStartStop, 0, len(containerOrder))
 	for _, cid := range containerOrder {
 		sp, ok := tempContainers[cid].(hasStartStop)
@@ -269,43 +267,29 @@ func (a *ToolsAPI) RegisterAll(plugins []Plugin) error {
 	return nil
 }
 
-// containerIDOf 在 tempContainers 里找出完整 id full 所属的容器 id。
-// 由于 tempTools 的 key 已经是拼接好的完整 id，这里用前缀匹配反查；
-// 单 tool 容器（完整id == 容器id）直接命中。
-func containerIDOf(tempTools map[PluginID]Tool, tempContainers map[PluginID]Plugin, full PluginID) PluginID {
-	if _, ok := tempContainers[full]; ok {
-		return full
-	}
-	for cid := range tempContainers {
-		if strings.HasPrefix(full, cid+".") {
-			return cid
-		}
-	}
-	return ""
-}
-
-// Resolve 用 DFS 拓扑排序返回执行顺序（依赖在前，按完整 tool id）。
-// 已注册的 tool 必须无环（RegisterAll 在 commit 时已保证；直接 Register 多个时也可能引入环——
+// Resolve 用 DFS 拓扑排序返回容器的执行顺序（依赖在前，按容器 id）。
+// 已注册的容器必须无环（RegisterAll 在 commit 时已保证；直接 Register 多个时也可能引入环——
 // Resolve 仍要兜底检测）。
 func (a *ToolsAPI) Resolve() ([]PluginID, error) {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
-	if len(a.tools) == 0 {
+	if len(a.containers) == 0 {
 		return nil, nil
 	}
-	return topoSort(a.tools)
+	return topoSortContainers(a.containers)
 }
 
-// topoSort 对完整id -> Tool 的 map 做 DFS 拓扑排序。
-// 返 (order, nil)：order 是依赖在前、执行在后的切片（完整 tool id）。
+// topoSortContainers 对容器id -> Plugin 的 map 做 DFS 拓扑排序，依赖边来自
+// containerDependsOn（未实现 DependentPlugin 的容器视为无依赖）。
+// 返 (order, nil)：order 是依赖在前、执行在后的切片（容器 id）。
 // 返 (nil, *CycleError)：环检测触发，error 含环路径。
-func topoSort(tools map[PluginID]Tool) ([]PluginID, error) {
+func topoSortContainers(containers map[PluginID]Plugin) ([]PluginID, error) {
 	const (
 		white = 0 // 未访问
 		gray  = 1 // 正在访问（在当前 DFS 路径上）
 		black = 2 // 已完成
 	)
-	color := make(map[PluginID]int, len(tools))
+	color := make(map[PluginID]int, len(containers))
 	var path []PluginID
 	var order []PluginID
 
@@ -327,10 +311,10 @@ func topoSort(tools map[PluginID]Tool) ([]PluginID, error) {
 		}
 		color[id] = gray
 		path = append(path, id)
-		for _, dep := range tools[id].DependsOn() {
-			// 依赖不在 tools map 里说明外部漏校验（Register / RegisterAll 已保证）
-			// 这里兜底：跳过缺失依赖（理论上不会到这里）
-			if _, ok := tools[dep]; !ok {
+		for _, dep := range containerDependsOn(containers[id]) {
+			// 依赖不在 containers map 里说明外部漏校验（Register / RegisterAll
+			// 已保证）这里兜底：跳过缺失依赖（理论上不会到这里）
+			if _, ok := containers[dep]; !ok {
 				continue
 			}
 			if err := visit(dep); err != nil {
@@ -344,8 +328,8 @@ func topoSort(tools map[PluginID]Tool) ([]PluginID, error) {
 	}
 
 	// 按 id 字典序访问，保证 Resolve 返的顺序确定性
-	ids := make([]PluginID, 0, len(tools))
-	for id := range tools {
+	ids := make([]PluginID, 0, len(containers))
+	for id := range containers {
 		ids = append(ids, id)
 	}
 	sort.Strings(ids)

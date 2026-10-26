@@ -44,7 +44,7 @@ func TestPluginIDValidate(t *testing.T) {
 // --- SimplePluginDef implements Tool ---
 
 func TestSimplePluginDefImplementsPlugin(t *testing.T) {
-	// 用一个最小 def 跑一遍 7 个 getter
+	// 用一个最小 def 跑一遍 getter
 	def := tools.SimplePluginDef{
 		ID_:          "util.echo",
 		Description_: "echo back",
@@ -68,11 +68,14 @@ func TestSimplePluginDefImplementsPlugin(t *testing.T) {
 	if p.Internal() != false {
 		t.Error("Internal: want false (default exported)")
 	}
-	if len(p.DependsOn()) != 1 || p.DependsOn()[0] != "store.userdb.read" {
-		t.Errorf("DependsOn: %v", p.DependsOn())
-	}
 	if p.Schema()["type"] != "object" {
 		t.Errorf("Schema: %v", p.Schema())
+	}
+
+	// DependsOn 是容器（Plugin）级别的：def 同时实现 DependentPlugin
+	var dp tools.DependentPlugin = def
+	if len(dp.DependsOn()) != 1 || dp.DependsOn()[0] != "store.userdb.read" {
+		t.Errorf("DependsOn: %v", dp.DependsOn())
 	}
 }
 
@@ -132,12 +135,11 @@ type manualPlugin struct {
 	calls int
 }
 
-func (m *manualPlugin) ID() tools.PluginID          { return m.id }
-func (m *manualPlugin) Description() string         { return "manual" }
-func (m *manualPlugin) Schema() map[string]any      { return nil }
-func (m *manualPlugin) DependsOn() []tools.PluginID { return nil }
-func (m *manualPlugin) Read() bool                  { return m.read }
-func (m *manualPlugin) Internal() bool              { return false }
+func (m *manualPlugin) ID() tools.PluginID     { return m.id }
+func (m *manualPlugin) Description() string    { return "manual" }
+func (m *manualPlugin) Schema() map[string]any { return nil }
+func (m *manualPlugin) Read() bool             { return m.read }
+func (m *manualPlugin) Internal() bool         { return false }
 func (m *manualPlugin) Call(ctx context.Context, ws tools.Context, args any) (any, error) {
 	m.calls++
 	return nil, nil

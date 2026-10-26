@@ -2,8 +2,8 @@
 //
 // 覆盖：
 //   - SimplePluginDef 声明式注册（最常用方式）
-//   - 自定义 Tool 接口实现（手写 7 个方法）
-//   - DependsOn 插件依赖 + 跨插件调用（通过 ws.API().Call）
+//   - 自定义 Tool 接口实现（手写方法）
+//   - DependsOn 插件依赖（容器级别，见 DependentPlugin）+ 跨插件调用（通过 ws.API().Call）
 //   - RegisterAll 批量注册（含依赖校验 + 拓扑排序）
 //   - Resolve 查看注册表的拓扑执行顺序
 //   - Tools() / Funcs() 双视图投影（LLM 视角 vs UI 视角）
@@ -53,7 +53,8 @@ func main() {
 		},
 	}, nil))
 
-	// 2. 自定义 Plugin 接口：手写 ID/Description/Schema/DependsOn/Read/Call 六个方法。
+	// 2. 自定义 Plugin 接口：手写 ID/Description/Schema/Read/Call 五个方法
+//    （DependsOn 是可选的 DependentPlugin 接口，这里没有依赖所以不实现）。
 	must(ws.Register(newGreeterPlugin(), nil))
 
 	// 3. DependsOn：func.calc 依赖 util.now，内部通过 ws.API().Call 调用依赖。
@@ -143,9 +144,8 @@ func (g *greeterPlugin) Schema() map[string]any {
 		"properties": map[string]any{"name": map[string]any{"type": "string"}},
 	}
 }
-func (g *greeterPlugin) DependsOn() []tools.PluginID { return nil }
-func (g *greeterPlugin) Read() bool                  { return true }
-func (g *greeterPlugin) Internal() bool              { return false }
+func (g *greeterPlugin) Read() bool     { return true }
+func (g *greeterPlugin) Internal() bool { return false }
 func (g *greeterPlugin) Call(_ context.Context, _ tools.Context, args any) (any, error) {
 	g.calls++
 	a, ok := args.(map[string]any)

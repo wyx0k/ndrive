@@ -17,8 +17,8 @@ go get github.com/wyx0k/ndrive
 | Concept | Description |
 |---|---|
 | **Workspace** | Independent workspace bound to a userID, holds meta storage, event bus, permission checker and the plugin registry |
-| **Plugin** | Plugin container — only declares `ID()` and the `Tools()` it hosts |
-| **Tool** | The actually callable unit: `Description`/`Schema`/`DependsOn`/`Read`/`Internal` + `Call` |
+| **Plugin** | Plugin container — declares `ID()` and the `Tools()` it hosts; can optionally implement `DependentPlugin` to declare container-level dependencies |
+| **Tool** | The actually callable unit: `Description`/`Schema`/`Read`/`Internal` + `Call` |
 | **ToolsAPI** | Plugin registry: registration, dependency topo-sort, permission-gated calls, LLM/UI dual-view projection |
 | **Permission** | Four permission levels: `RAsk < R < WAsk < W`, configured per user |
 | **Bus** | In-process pub/sub + sync request channel |
@@ -26,7 +26,7 @@ go get github.com/wyx0k/ndrive
 ## Features
 
 - **Plugin/Tool two-layer model**: a Plugin container can host multiple Tools (e.g. a local filesystem capability exposing `list`/`read`/`search`/`stat`), and `Internal()` can hide a Tool so it's only reusable internally without being exposed to LLM/UI
-- **Dependency graph + topo-sort**: Tools declare dependencies via `DependsOn`; registration validates them, and batch registration sorts them automatically
+- **Dependency graph + topo-sort**: Plugin containers declare dependencies via the optional `DependentPlugin` interface (`DependsOn() []PluginID`); registration validates them, and batch registration topo-sorts containers automatically — all Tools in a container share the same dependency declaration
 - **Four-level permission model**: `RAsk`/`R`/`WAsk`/`W` — `WAsk`/`RAsk` issue a confirmation request over the Bus, suitable for high-risk operations that need human review
 - **Event bus**: every Call automatically broadcasts `start`/`done`/`error` lifecycle events; plugins can also publish custom events, making it easy to hook into an LLM pipeline or a UI layer
 - **Container lifecycle**: plugins can optionally implement `StatefulPlugin` (start/stop), `ReloadablePlugin` (hot config reload), `ServicePlugin` (expose an internal service object)

@@ -17,8 +17,8 @@ go get github.com/wyx0k/ndrive
 | 概念 | 说明 |
 |---|---|
 | **Workspace** | 独立工作空间，绑定 userID，持有 meta 存储、事件总线、权限 Checker 和插件注册中心 |
-| **Plugin** | 插件容器，只负责声明 `ID()` 和挂载的 `Tools()` 列表 |
-| **Tool** | 真正可调用的单元：`Description`/`Schema`/`DependsOn`/`Read`/`Internal` + `Call` |
+| **Plugin** | 插件容器，声明 `ID()` 和挂载的 `Tools()` 列表；可选实现 `DependentPlugin` 声明容器级别依赖 |
+| **Tool** | 真正可调用的单元：`Description`/`Schema`/`Read`/`Internal` + `Call` |
 | **ToolsAPI** | 插件注册中心：注册、依赖拓扑排序、权限门控调用、LLM/UI 双视图投影 |
 | **Permission** | 四档权限：`RAsk < R < WAsk < W`，按 user 维度配置 |
 | **Bus** | 进程内发布/订阅 + 同步请求通道 |
@@ -26,7 +26,7 @@ go get github.com/wyx0k/ndrive
 ## 特性
 
 - **Plugin/Tool 二层模型**：一个 Plugin 容器下可以挂多个 Tool（比如一套文件系统能力的 `list`/`read`/`search`/`stat`），也可以用 `Internal()` 把某个 Tool 隐藏成"只给内部复用、不直接暴露给 LLM/UI"
-- **依赖图 + 拓扑排序**：Tool 之间用 `DependsOn` 声明依赖，注册时自动校验、批量注册时自动排序
+- **依赖图 + 拓扑排序**：Plugin 容器之间用可选接口 `DependentPlugin`（`DependsOn() []PluginID`）声明依赖，注册时自动校验、批量注册时按容器自动排序——一个容器下所有 Tool 共享同一份依赖
 - **四档权限模型**：`RAsk`/`R`/`WAsk`/`W`，`WAsk`/`RAsk` 会通过 Bus 向外发起确认请求，适合需要人审的高风险操作
 - **事件总线**：每次 Call 自动广播 `start`/`done`/`error` 生命周期事件，插件内部也能发自定义事件，方便 LLM pipeline 和 UI 层挂载
 - **容器生命周期**：插件可选实现 `StatefulPlugin`（启动/停止）、`ReloadablePlugin`（热更新配置）、`ServicePlugin`（暴露内部服务对象）

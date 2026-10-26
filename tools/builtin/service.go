@@ -2,9 +2,9 @@
 // （本地文件系统、对象存储……）可以互相替换，消费方只认这一个接口类型。
 //
 // 提供方（如 plugins/localfs）实现 tools.ServicePlugin，Service() 返回
-// 一个 FileService 值；消费方（如解析 pptx/docx 的 plugin）在自己的
-// DependsOn_ 里声明依赖该 plugin id，运行时用 ws.API().Service(id) 取出后
-// 断言成 FileService 使用。
+// 一个 FileService 值；消费方（如解析 pptx/docx 的 plugin）通过
+// tools.DependentPlugin.DependsOn() 声明依赖该 plugin id，运行时用
+// ws.API().Service(id) 取出后断言成 FileService 使用。
 package builtin
 
 import (

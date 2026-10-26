@@ -20,6 +20,7 @@
 | 11 | cleanup v4 remnants | All | 删 `pkg/tree`, `pkg/backend`, `pkg/subkind`, `pkg/ctx`, `cmd/ntd`；更新 tests | ✅ |
 | 12 | tools - Plugin/Tool 二层拆分 | Spec 3, 4, 5 | `tools/tools.go`, `tools/registry.go`, `tools/dispatch.go`, `plugins/localfs/plugin.go` + tests | ✅ |
 | 13 | localfs - 写能力扩展 | Spec 12 | `plugins/localfs/localfs.go`, `plugins/localfs/plugin.go`, `tools/builtin/service.go` + tests | ✅ |
+| 14 | tools - DependsOn 下放到容器级别 | Spec 12 | `tools/tools.go`, `tools/registry.go`, `tools/registry_test.go`, `tools/types_test.go` + tests | ✅ |
 
 ## Spec 详细说明
 
@@ -48,7 +49,7 @@
 - 创建 `tools/` 顶层包
 - 定义两层接口：
   - `Plugin` interface（容器）：`ID() PluginID` / `Tools() []Tool`
-  - `Tool` interface（可调用单元）：`ID() string` / `Description()` / `Schema()` / `DependsOn() []PluginID` / `Read() bool` / `Internal() bool` / `Call(ctx, ws, args) (any, error)`
+  - `Tool` interface（可调用单元）：`ID() string` / `Description()` / `Schema()` / `DependsOn() []PluginID` / `Read() bool` / `Internal() bool` / `Call(ctx, ws, args) (any, error)`（`DependsOn` 后来在 Spec 14 下放到容器级别，不再是 `Tool` 的方法）
 - `SimplePluginDef` struct（7 field：`ID_/Description_/Schema_/DependsOn_/Read_/Internal_/Fn_`）同时实现 `Tool` 和 `Plugin`（单 tool 容器）
 - `AsPlugin(t Tool) Plugin` —— 把裸 `Tool` 包成单 tool 容器
 - `Context` interface, `ToolInfo` / `Func` 投影结构
@@ -56,8 +57,8 @@
 
 ### Spec 4: tools - registry
 - `ToolsAPI` struct（`tools` 全 id 索引 + `containers` 容器 id 索引 + `lifecycleTargets` 容器 id 索引）+ `NewToolsAPI(ws Context) *ToolsAPI`
-- `Register(v any, cfg any) error` —— `v` 可以是容器 `Plugin` 或裸 `Tool`（自动 `AsPlugin` 包装）；立即校验容器 id + 每个 tool 的 full id，校验 `DependsOn` 已注册；若 lifecycle target 实现 `StatefulPlugin` 则调 `StartPlugin(ws, cfg)`；失败整体回滚，不留半成品
-- `RegisterAll(plugins []Plugin) error` —— 按 `DependsOn` 拓扑排序，按容器去重后依次 `StartPlugin`；中途失败按已启动顺序反向 `StopPlugin` 回滚
+- `Register(v any, cfg any) error` —— `v` 可以是容器 `Plugin` 或裸 `Tool`（自动 `AsPlugin` 包装）；立即校验容器 id + 每个 tool 的 full id，校验 `DependsOn` 已注册（Spec 14 后改为容器级别校验）；若 lifecycle target 实现 `StatefulPlugin` 则调 `StartPlugin(ws, cfg)`；失败整体回滚，不留半成品
+- `RegisterAll(plugins []Plugin) error` —— 按 `DependsOn` 拓扑排序，按容器去重后依次 `StartPlugin`（Spec 14 后拓扑排序直接按容器粒度，不再需要去重）；中途失败按已启动顺序反向 `StopPlugin` 回滚
 - `Resolve() ([]PluginID, error)` —— 对 full id 索引做 DFS 拓扑排序 + 环检测
 - 可选容器能力接口：`StatefulPlugin`（`StartPlugin/StopPlugin`）、`ReloadablePlugin`（`UpdateConfig`）、`ServicePlugin`（`Service`）
 - 错误：`ErrPluginNotFound` / `ErrPluginDuplicate` / `ErrPluginCycle` + `CycleError{Cycle: []PluginID}` typed error
@@ -155,6 +156,19 @@
   - `write-markdown` —— 对应 `FS.Write`，参数 `withfm`(bool)/`fm`(map)/`body`(string)；`withfm=true` 时用 `gopkg.in/yaml.v3` 把 `fm` 序列化成 `---\n<yaml>---\n` 前缀拼在 `body` 前
   - `edit` —— 对应 `FS.Edit`，参数 `path`/`old`/`new`/`modTime`（RFC3339Nano 字符串）；`old` 必须在文件内容中恰好出现一次，否则返回 `ErrOldNotFound`/`ErrOldNotUnique`；`modTime` 与文件当前修改时间不一致返回 `ErrModTimeMismatch`
 - 新依赖：`gopkg.in/yaml.v3`（从 indirect 提升为 direct，用于 `write-markdown` 的 frontmatter 序列化）
+- 验证：`go build ./...` + `go vet ./...` + `go test ./...` 全绿
+
+### Spec 14: tools - DependsOn 下放到容器级别
+- 动机：Spec 3 把 `DependsOn` 定义在 `Tool` 接口上，但 Spec 12 拆出 `Plugin`（容器）/`Tool`（可调用单元）两层后，依赖关系在语义上属于容器——一个容器下的多个 tool 共享内部状态，天然应该共享同一份依赖声明；`Tool` 级别的 `DependsOn` 既无法被 `plugins/localfs` 这类多 tool 容器自然表达（没有任何单个 tool 适合代表整个容器的依赖），也和 `StatefulPlugin`/`ReloadablePlugin`/`ServicePlugin` 已经确立的"容器级别可选接口"风格不一致
+- 改动：
+  - `Tool` 接口移除 `DependsOn() []PluginID`
+  - 新增可选接口 `DependentPlugin`（嵌 `Plugin` + `DependsOn() []PluginID`），风格对齐 `StatefulPlugin` 等；未实现该接口的 `Plugin` 视为没有依赖，不是编译期强制
+  - `SimplePluginDef` 保留 `DependsOn_` 字段，`DependsOn()` getter 改为只实现 `DependentPlugin`（不再是 `Tool` 的方法）；单 tool 容器场景下容器 id 就是 `ID_`，写法不变
+  - `registry.go` 新增 `containerDependsOn(Plugin) []PluginID` helper（类型断言 `DependentPlugin`，未实现返 `nil`）；`Register`/`RegisterAll` 的依赖校验从"每个 tool 的 full id 查 `a.tools`"改为"每个容器查 `a.containers`"
+  - 拓扑排序从 `topoSort(map[PluginID]Tool)`（tool full id 粒度）改写成 `topoSortContainers(map[PluginID]Plugin)`（容器 id 粒度）；`RegisterAll` 不再需要 `containerIDOf` 前缀匹配反查容器（直接在容器粒度排序）
+  - `Resolve()` 返回值语义变化：从"tool full id 的拓扑序"变成"容器 id 的拓扑序"（多 tool 容器只出现一次，不按 tool 数量重复）
+- 向后兼容：所有现有 `SimplePluginDef{DependsOn_: [...]}` 用法不变（单 tool 容器下容器 id == tool full id）；只有手写 `Tool`（不再声明 `DependsOn()`）和手写 `Plugin` 想要依赖声明（需额外实现 `DependentPlugin`）的场景需要跟着接口改动调整
+- 新增测试覆盖此前缺失的场景：`multiToolStub`（真正的多 tool 容器）声明容器级别依赖，验证 (a) 缺依赖时 `Register` 整体失败、满足后两个 tool 都能注册且可调用；(b) `Resolve()` 对多 tool 容器只返回一次容器 id，拓扑顺序正确
 - 验证：`go build ./...` + `go vet ./...` + `go test ./...` 全绿
 
 ## 实施顺序
