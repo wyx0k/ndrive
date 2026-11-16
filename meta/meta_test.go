@@ -51,7 +51,6 @@ func TestKeys(t *testing.T) {
 		{meta.WorkspaceKey("ws1"), "workspace/ws1"},
 		{meta.PermissionKey("ws1", "u1"), "permission_binding/ws1/u1"},
 		{meta.PermissionPrefix("ws1"), "permission_binding/ws1/"},
-		{meta.PluginKey("util.echo"), "plugin/util.echo"},
 	}
 	for _, c := range cases {
 		if c.got != c.want {
@@ -109,7 +108,7 @@ func TestPermissionStoreRoundtrip(t *testing.T) {
 	ps := meta.NewPermissionStore(s)
 	ctx := context.Background()
 
-	b := permission.Binding{WorkspaceID: "ws1", UserID: "u1", Mode: permission.W}
+	b := permission.Binding{WorkspaceID: "ws1", UserID: "u1", Mode: permission.ModeWriteOnly}
 	if err := ps.SetBinding(ctx, b); err != nil {
 		t.Fatalf("SetBinding: %v", err)
 	}
@@ -135,7 +134,7 @@ func TestPermissionStoreDelete(t *testing.T) {
 	s := newMemStore()
 	ps := meta.NewPermissionStore(s)
 	ctx := context.Background()
-	_ = ps.SetBinding(ctx, permission.Binding{WorkspaceID: "ws", UserID: "u", Mode: permission.R})
+	_ = ps.SetBinding(ctx, permission.Binding{WorkspaceID: "ws", UserID: "u", Mode: permission.ModeReadOnly})
 	if err := ps.DeleteBinding(ctx, "ws", "u"); err != nil {
 		t.Fatalf("DeleteBinding: %v", err)
 	}
@@ -148,9 +147,9 @@ func TestPermissionStoreList(t *testing.T) {
 	s := newMemStore()
 	ps := meta.NewPermissionStore(s)
 	ctx := context.Background()
-	_ = ps.SetBinding(ctx, permission.Binding{WorkspaceID: "ws", UserID: "a", Mode: permission.R})
-	_ = ps.SetBinding(ctx, permission.Binding{WorkspaceID: "ws", UserID: "b", Mode: permission.W})
-	_ = ps.SetBinding(ctx, permission.Binding{WorkspaceID: "other", UserID: "c", Mode: permission.RAsk})
+	_ = ps.SetBinding(ctx, permission.Binding{WorkspaceID: "ws", UserID: "a", Mode: permission.ModeReadOnly})
+	_ = ps.SetBinding(ctx, permission.Binding{WorkspaceID: "ws", UserID: "b", Mode: permission.ModeWriteOnly})
+	_ = ps.SetBinding(ctx, permission.Binding{WorkspaceID: "other", UserID: "c", Mode: permission.ModeWriteAsk})
 
 	bs, err := ps.ListBindings(ctx, "ws")
 	if err != nil {

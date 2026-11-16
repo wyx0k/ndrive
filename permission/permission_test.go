@@ -80,10 +80,10 @@ func TestModeString(t *testing.T) {
 		m    permission.Mode
 		want string
 	}{
-		{permission.RAsk, "RAsk"},
-		{permission.R, "R"},
-		{permission.WAsk, "WAsk"},
-		{permission.W, "W"},
+		{permission.ModeWriteAsk, "WriteAsk"},
+		{permission.ModeReadOnly, "ReadOnly"},
+		{permission.ModeAskAll, "AskAll"},
+		{permission.ModeWriteOnly, "WriteOnly"},
 	}
 	for _, c := range cases {
 		if got := c.m.String(); got != c.want {
@@ -93,7 +93,7 @@ func TestModeString(t *testing.T) {
 }
 
 func TestModeJSONRoundtrip(t *testing.T) {
-	cases := []permission.Mode{permission.RAsk, permission.R, permission.WAsk, permission.W}
+	cases := []permission.Mode{permission.ModeWriteAsk, permission.ModeReadOnly, permission.ModeAskAll, permission.ModeWriteOnly}
 	for _, m := range cases {
 		data, err := json.Marshal(m)
 		if err != nil {
@@ -110,7 +110,7 @@ func TestModeJSONRoundtrip(t *testing.T) {
 }
 
 func TestBindingJSON(t *testing.T) {
-	b := permission.Binding{WorkspaceID: "ws", UserID: "u", Mode: permission.WAsk}
+	b := permission.Binding{WorkspaceID: "ws", UserID: "u", Mode: permission.ModeAskAll}
 	data, err := json.Marshal(b)
 	if err != nil {
 		t.Fatalf("Marshal: %v", err)
@@ -123,55 +123,90 @@ func TestBindingJSON(t *testing.T) {
 
 // --- 决策矩阵：4 mode × 2 op 类型 ---
 
-func TestMatrixR(t *testing.T) {
-	c, _, _ := newChecker(t, permission.R)
+func TestMatrixReadOnly(t *testing.T) {
+	c, _, _ := newChecker(t, permission.ModeReadOnly)
 	if err := c.CheckRead(context.Background(), "r"); err != nil {
-		t.Errorf("R+read: want nil, got %v", err)
+		t.Errorf("ReadOnly+read: want nil, got %v", err)
 	}
 	if err := c.CheckWrite(context.Background(), "w"); err == nil {
-		t.Error("R+write: want error, got nil")
+		t.Error("ReadOnly+write: want error, got nil")
 	} else if !errors.Is(err, permission.ErrPermissionDenied) {
-		t.Errorf("R+write: want ErrPermissionDenied, got %v", err)
+		t.Errorf("ReadOnly+write: want ErrPermissionDenied, got %v", err)
 	}
 }
 
-func TestMatrixRAsk(t *testing.T) {
-	c, _, _ := newChecker(t, permission.RAsk)
+func TestMatrixWriteAsk(t *testing.T) {
+	c, _, _ := newChecker(t, permission.ModeWriteAsk)
 	if err := c.CheckRead(context.Background(), "r"); err != nil {
-		t.Errorf("RAsk+read: want nil, got %v", err)
+		t.Errorf("WriteAsk+read: want nil, got %v", err)
 	}
-	// RAsk + write 应该走 ask；没注册 handler → ErrPermissionDenied
+	// WriteAsk + write 应该走 ask；没注册 handler → ErrPermissionDenied
 	if err := c.CheckWrite(context.Background(), "w"); err == nil {
-		t.Error("RAsk+write: want error (no subscriber), got nil")
+		t.Error("WriteAsk+write: want error (no subscriber), got nil")
 	} else if !errors.Is(err, permission.ErrPermissionDenied) {
-		t.Errorf("RAsk+write: want ErrPermissionDenied, got %v", err)
+		t.Errorf("WriteAsk+write: want ErrPermissionDenied, got %v", err)
 	}
 }
 
-func TestMatrixW(t *testing.T) {
-	c, _, _ := newChecker(t, permission.W)
+func TestMatrixWriteOnly(t *testing.T) {
+	c, _, _ := newChecker(t, permission.ModeWriteOnly)
 	if err := c.CheckWrite(context.Background(), "w"); err != nil {
-		t.Errorf("W+write: want nil, got %v", err)
+		t.Errorf("WriteOnly+write: want nil, got %v", err)
 	}
 	if err := c.CheckRead(context.Background(), "r"); err == nil {
-		t.Error("W+read: want error, got nil")
+		t.Error("WriteOnly+read: want error, got nil")
 	} else if !errors.Is(err, permission.ErrPermissionDenied) {
-		t.Errorf("W+read: want ErrPermissionDenied, got %v", err)
+		t.Errorf("WriteOnly+read: want ErrPermissionDenied, got %v", err)
 	}
 }
 
-func TestMatrixWAsk(t *testing.T) {
-	c, _, _ := newChecker(t, permission.WAsk)
-	// WAsk 对读也走 ask
+func TestMatrixAskAll(t *testing.T) {
+	c, _, _ := newChecker(t, permission.ModeAskAll)
+	// AskAll 对读也走 ask
 	if err := c.CheckRead(context.Background(), "r"); err == nil {
-		t.Error("WAsk+read: want error (no subscriber), got nil")
+		t.Error("AskAll+read: want error (no subscriber), got nil")
 	} else if !errors.Is(err, permission.ErrPermissionDenied) {
-		t.Errorf("WAsk+read: want ErrPermissionDenied, got %v", err)
+		t.Errorf("AskAll+read: want ErrPermissionDenied, got %v", err)
 	}
 	if err := c.CheckWrite(context.Background(), "w"); err == nil {
-		t.Error("WAsk+write: want error (no subscriber), got nil")
+		t.Error("AskAll+write: want error (no subscriber), got nil")
 	} else if !errors.Is(err, permission.ErrPermissionDenied) {
-		t.Errorf("WAsk+write: want ErrPermissionDenied, got %v", err)
+		t.Errorf("AskAll+write: want ErrPermissionDenied, got %v", err)
+	}
+}
+
+// fail-closed：没有 binding = 没授权 = 拒绝（而不是把底层 "not found" 透出去）。
+func TestMissingBindingDenied(t *testing.T) {
+	store := newMemStore() // 故意不 SetBinding
+	c := permission.NewChecker(store, "ws1", "nobody", bus.New())
+	err := c.CheckRead(context.Background(), "r")
+	if err == nil {
+		t.Fatal("want ErrPermissionDenied, got nil")
+	}
+	if !errors.Is(err, permission.ErrPermissionDenied) {
+		t.Errorf("want ErrPermissionDenied, got %v", err)
+	}
+}
+
+// fail-closed：mode 越界（脏数据）时拒绝，不能默认放行。
+func TestUnknownModeDenied(t *testing.T) {
+	store := newMemStore()
+	_ = store.SetBinding(context.Background(), permission.Binding{
+		WorkspaceID: "ws1", UserID: "u1", Mode: permission.Mode(99),
+	})
+	c := permission.NewChecker(store, "ws1", "u1", bus.New())
+	for _, tc := range []struct {
+		name string
+		fn   func(context.Context, string) error
+	}{
+		{"read", c.CheckRead},
+		{"write", c.CheckWrite},
+	} {
+		if err := tc.fn(context.Background(), "op"); err == nil {
+			t.Errorf("%s: want ErrPermissionDenied, got nil", tc.name)
+		} else if !errors.Is(err, permission.ErrPermissionDenied) {
+			t.Errorf("%s: want ErrPermissionDenied, got %v", tc.name, err)
+		}
 	}
 }
 
@@ -189,7 +224,7 @@ func installAskApprover(b bus.Bus) (func(), error) {
 }
 
 func TestAskApproved(t *testing.T) {
-	c, _, b := newChecker(t, permission.RAsk)
+	c, _, b := newChecker(t, permission.ModeWriteAsk)
 	unsub, err := installAskApprover(b)
 	if err != nil {
 		t.Fatalf("Handle: %v", err)
@@ -202,7 +237,7 @@ func TestAskApproved(t *testing.T) {
 }
 
 func TestAskDenied(t *testing.T) {
-	c, _, b := newChecker(t, permission.RAsk)
+	c, _, b := newChecker(t, permission.ModeWriteAsk)
 	unsub, err := b.Handle("permission.ask", func(ctx context.Context, req any) (any, error) {
 		return permission.AskResponse{Approved: false}, nil
 	})
@@ -219,7 +254,7 @@ func TestAskDenied(t *testing.T) {
 }
 
 func TestAskNoSubscriber(t *testing.T) {
-	c, _, _ := newChecker(t, permission.RAsk) // no handler installed
+	c, _, _ := newChecker(t, permission.ModeWriteAsk) // no handler installed
 	if err := c.CheckWrite(context.Background(), "w"); err == nil {
 		t.Fatal("want ErrPermissionDenied (no subscriber), got nil")
 	} else if !errors.Is(err, permission.ErrPermissionDenied) {
@@ -229,7 +264,7 @@ func TestAskNoSubscriber(t *testing.T) {
 
 // handler 内部 listen ctx 取消 → permission 收到 ErrRequestTimeout → 转 ErrPermissionDenied
 func TestAskTimeout(t *testing.T) {
-	c, _, b := newChecker(t, permission.RAsk)
+	c, _, b := newChecker(t, permission.ModeWriteAsk)
 	unsub, err := b.Handle("permission.ask", func(ctx context.Context, req any) (any, error) {
 		<-ctx.Done()
 		return nil, ctx.Err()
@@ -250,7 +285,7 @@ func TestAskTimeout(t *testing.T) {
 
 // handler 返非 AskResponse → 转 ErrPermissionDenied
 func TestAskBadResponseType(t *testing.T) {
-	c, _, b := newChecker(t, permission.RAsk)
+	c, _, b := newChecker(t, permission.ModeWriteAsk)
 	unsub, err := b.Handle("permission.ask", func(ctx context.Context, req any) (any, error) {
 		return "not an AskResponse", nil
 	})
@@ -268,7 +303,7 @@ func TestAskBadResponseType(t *testing.T) {
 
 // handler 返错（不是 ctx cancel）→ permission 透传为 ErrPermissionDenied
 func TestAskHandlerError(t *testing.T) {
-	c, _, b := newChecker(t, permission.RAsk)
+	c, _, b := newChecker(t, permission.ModeWriteAsk)
 	want := errors.New("ui crash")
 	unsub, err := b.Handle("permission.ask", func(ctx context.Context, req any) (any, error) {
 		return nil, want
@@ -287,7 +322,7 @@ func TestAskHandlerError(t *testing.T) {
 
 // v5 关键：AskPayload.Preview 允许空（permission 包传空串，handler 不报错）
 func TestAskPayloadPreviewEmpty(t *testing.T) {
-	c, _, b := newChecker(t, permission.RAsk)
+	c, _, b := newChecker(t, permission.ModeWriteAsk)
 	var got permission.AskPayload
 	unsub, err := b.Handle("permission.ask", func(ctx context.Context, req any) (any, error) {
 		got = req.(permission.AskPayload)
@@ -316,8 +351,8 @@ func TestAskPayloadPreviewEmpty(t *testing.T) {
 
 func TestMultipleUsers(t *testing.T) {
 	store := newMemStore()
-	_ = store.SetBinding(context.Background(), permission.Binding{WorkspaceID: "ws", UserID: "alice", Mode: permission.W})
-	_ = store.SetBinding(context.Background(), permission.Binding{WorkspaceID: "ws", UserID: "bob", Mode: permission.R})
+	_ = store.SetBinding(context.Background(), permission.Binding{WorkspaceID: "ws", UserID: "alice", Mode: permission.ModeWriteOnly})
+	_ = store.SetBinding(context.Background(), permission.Binding{WorkspaceID: "ws", UserID: "bob", Mode: permission.ModeReadOnly})
 	b := bus.New()
 
 	alice := permission.NewChecker(store, "ws", "alice", b)
@@ -338,9 +373,9 @@ func TestMultipleUsers(t *testing.T) {
 
 func TestWorkspaceStoreList(t *testing.T) {
 	store := newMemStore()
-	_ = store.SetBinding(context.Background(), permission.Binding{WorkspaceID: "ws", UserID: "a", Mode: permission.R})
-	_ = store.SetBinding(context.Background(), permission.Binding{WorkspaceID: "ws", UserID: "b", Mode: permission.W})
-	_ = store.SetBinding(context.Background(), permission.Binding{WorkspaceID: "other", UserID: "c", Mode: permission.WAsk})
+	_ = store.SetBinding(context.Background(), permission.Binding{WorkspaceID: "ws", UserID: "a", Mode: permission.ModeReadOnly})
+	_ = store.SetBinding(context.Background(), permission.Binding{WorkspaceID: "ws", UserID: "b", Mode: permission.ModeWriteOnly})
+	_ = store.SetBinding(context.Background(), permission.Binding{WorkspaceID: "other", UserID: "c", Mode: permission.ModeAskAll})
 
 	bs, err := store.ListBindings(context.Background(), "ws")
 	if err != nil {
@@ -353,7 +388,7 @@ func TestWorkspaceStoreList(t *testing.T) {
 
 func TestWorkspaceStoreDelete(t *testing.T) {
 	store := newMemStore()
-	_ = store.SetBinding(context.Background(), permission.Binding{WorkspaceID: "ws", UserID: "u", Mode: permission.R})
+	_ = store.SetBinding(context.Background(), permission.Binding{WorkspaceID: "ws", UserID: "u", Mode: permission.ModeReadOnly})
 	if err := store.DeleteBinding(context.Background(), "ws", "u"); err != nil {
 		t.Fatalf("DeleteBinding: %v", err)
 	}

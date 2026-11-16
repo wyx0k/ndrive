@@ -8,7 +8,6 @@ package meta
 const (
 	KindWorkspace         = "workspace"
 	KindPermissionBinding = "permission_binding"
-	KindPlugin            = "plugin"
 )
 
 // WorkspaceKey 构造 workspace/<id> key。
@@ -24,9 +23,4 @@ func PermissionKey(wsID, userID string) string {
 // PermissionPrefix 构造 permission_binding/<wsID>/ 前缀（用于 List）。
 func PermissionPrefix(wsID string) string {
 	return KindPermissionBinding + "/" + wsID + "/"
-}
-
-// PluginKey 构造 plugin/<id> key（预留）。
-func PluginKey(id string) string {
-	return KindPlugin + "/" + id
 }

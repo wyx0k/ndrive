@@ -1,7 +1,9 @@
 # NDrive v5 实施 Specs
 
 > 本文档列出 v5 架构的实施分解。每个 spec 是一次独立 PR 级别的实现单位。
-> 设计参考：[ARCHITECTURE.md](ARCHITECTURE.md)（v5）
+> 设计参考：[ARCHITECTURE.md](ARCHITECTURE.md)
+>
+> Spec 1–16 是 v5 的实施历史；**Spec 17 是 v6 架构重构**，它改写了 Spec 3 / 5 / 6 / 9 / 12 / 13 / 15 涉及的接口形状；**Spec 18 是 v6 的第二刀 —— 去掉 Plugin 容器层**，它再次改写了 Spec 3 / 4 / 5 / 12 / 14 涉及的接口形状；**Spec 19 是 v6 的第三刀 —— 配置契约开放化 + 权限语义澄清 + 文件变更上总线**，它改写了 Spec 2 / 3 / 4 / 5 / 17 涉及的接口形状。下面各节的描述以 Spec 17 + Spec 18 + Spec 19 为准。
 
 ## Spec 列表
 
@@ -12,17 +14,20 @@
 | 3 | tools - core types | Spec 1 | `tools/tools.go`, `tools/types_test.go` | ✅ |
 | 4 | tools - registry | Spec 3 | `tools/registry.go`, `tools/registry_test.go` | ✅ |
 | 5 | tools - dispatch | Spec 2, 4 | `tools/dispatch.go`, `tools/dispatch_test.go` | ✅ |
-| 6 | tools/builtin | Spec 3 | `tools/builtin/builtin.go`, `tools/builtin/builtin_test.go` | ✅ |
-| 7 | ndrive - core + config | Spec 1, 4 | `ndrive.go`, `workspace.go`, `config.go`, `open.go` + tests | ✅ |
-| 8 | ndrive - permission methods | Spec 2, 7 | `policy.go`, `policy_test.go` | ✅ |
-| 9 | ndrive/internal/id | Spec 7 | `internal/id/id.go`, `internal/id/id_test.go` | ✅ |
-| 10 | ndrive/internal/meta | Spec 7 | `internal/meta/meta.go`, `internal/meta/meta_test.go` | ✅ |
+| 6 | tools/builtin | Spec 3 | `tools/builtin.go`, `tools/builtin_test.go`（Spec 17 起在 `tools` 包内） | ✅ |
+| 7 | ndrive - core + config | Spec 1, 4 | `ndrive.go`, `workspace.go`, `config.go` + tests | ✅ |
+| 8 | ndrive - permission methods | Spec 2, 7 | `policy.go` | ✅ |
+| 9 | ndrive/internal/id | Spec 7 | ~~`id/id.go`~~（Spec 17 整体移除） | ➖ 已移除 |
+| 10 | ndrive/internal/meta | Spec 7 | `meta/meta.go`, `meta/workspace.go`, `meta/permission.go`, `meta/keys.go` | ✅ |
 | 11 | cleanup v4 remnants | All | 删 `pkg/tree`, `pkg/backend`, `pkg/subkind`, `pkg/ctx`, `cmd/ntd`；更新 tests | ✅ |
-| 12 | tools - Plugin/Tool 二层拆分 | Spec 3, 4, 5 | `tools/tools.go`, `tools/registry.go`, `tools/dispatch.go`, `plugins/localfs/plugin.go` + tests | ✅ |
-| 13 | localfs - 写能力扩展 | Spec 12 | `plugins/localfs/localfs.go`, `plugins/localfs/plugin.go`, `tools/builtin/service.go` + tests | ✅ |
-| 14 | tools - DependsOn 下放到容器级别 | Spec 12 | `tools/tools.go`, `tools/registry.go`, `tools/registry_test.go`, `tools/types_test.go` + tests | ✅ |
-| 15 | localfs - 删除能力 | Spec 13 | `plugins/localfs/localfs.go`, `plugins/localfs/plugin.go`, `tools/builtin/service.go` + tests | ✅ |
-| 16 | localfs - 路径安全校验（软链越界） | Spec 13 | `plugins/localfs/localfs.go`, `plugins/localfs/path_test.go` | ✅ |
+| 12 | tools - Plugin/Tool 二层拆分（Spec 18 起整体移除） | Spec 3, 4, 5 | ~~`tools/tools.go`, `tools/registry.go`, `tools/dispatch.go`~~ | ➖ 已移除 |
+| 13 | localfs - 写能力扩展 | Spec 12 | `fs/local/local.go`, `fs/fs.go` + tests | ✅ |
+| 14 | tools - DependsOn 下放到容器级别（Spec 18 起回到 tool 级） | Spec 12 | `tools/tools.go`, `tools/registry.go`, `tools/registry_test.go`, `tools/types_test.go` + tests | ✅ |
+| 15 | localfs - 删除能力 | Spec 13 | `fs/local/local.go`, `fs/fs.go` + tests | ✅ |
+| 16 | localfs - 路径安全校验（软链越界） | Spec 13 | `fs/local/local.go`, `fs/local/path_test.go` | ✅ |
+| 17 | v6 架构重构：fs-api + 单一入口 | All | `fs/fs.go`, `fs/local/local.go`, `tools/dispatch.go`, `tools/registry.go`, `config.go`, `ndrive.go`, `workspace.go` | ✅ |
+| 18 | v6 架构重构：去掉 Plugin 容器层 | All | `tools/tools.go`, `tools/registry.go`, `tools/dispatch.go`, `tools/builtin.go`, `workspace.go` + tests | ✅ |
+| 19 | v6 架构重构：配置契约开放化 + 权限语义澄清 + 文件变更上总线 | Spec 17, 18 | `fs/fs.go`, `fs/local/config.go`, `meta/meta.go`, `meta/sqlite/sqlite.go`, `meta/mysql/mysql.go`, `permission/permission.go`, `tools/tools.go`, `tools/registry.go`, `config.go`, `ndrive.go`, `workspace.go`, `fsevents.go` + tests | ✅ |
 
 ## Spec 详细说明
 
@@ -205,9 +210,108 @@
 - 已知残留风险：校验与实际 open 之间存在 TOCTOU 窗口 —— 有本地写权限的攻击者可以在窗口内把路径换成链接。彻底消除需要 `O_NOFOLLOW` 之类的打开语义，跨平台不可得，这里只保证"稳态下不越界"
 - 验证：`go build ./...` + `go vet ./...` + `go test ./...` 全绿；新增 `plugins/localfs/path_test.go`（Windows 上用 junction 建链接，不需要软链特权；其它平台用软链）
 
+### Spec 17: v6 架构重构 —— fs-api + 单一执行入口
+
+- 动机：v5 里工作区没有文件系统概念，文件能力靠 `plugins/localfs` 这个"既是 plugin 又是服务"的混合体承载（容器同时实现 `StatefulPlugin` 和 `ServicePlugin`，对外暴露 10 个 tool）。这带来三个问题：
+  1. **文件能力绑死在 plugin 形态上** —— 换存储后端（内存、单文件、对象存储）就得重写一整套 plugin + tool 定义
+  2. **两套调用入口语义容易漂移** —— `Call`（AI 调用）和 `Funcs()`（函数调用）是两条路径，门控与事件行为可能不一致
+  3. **两套投影** —— `Tools()`（LLM 视角）和 `Funcs()`（UI 视角）内容重叠，维护两份
+- 变更：
+  - **新增 `fs` 包（fs-api）**：纯契约包（只依赖 stdlib），定义 `FileService`（9 个方法）+ 可选扩展 `Watcher` + 约定目录常量 `TmpDir = ".tmp"` / `MemDir = ".mem"` + `FileEntry` / `ListPage` / `Event`
+  - **`fs/local`（fs-local）**：从 `plugins/localfs/localfs.go` 平移并改造为 `FileService` 实现。保留全部沙盒能力（词法校验 + 软链/junction 校验 + `realRoot` + `readBrief` / `matchesContent` 二次校验），保留 `Search` 不进目录链接的行为。文件变更监听从 plugin 的 `StatefulPlugin` 生命周期里剥离，改为 `FS` 自己的 `WithWatch` 选项 + `Events()` channel + `Close()`
+  - **约定目录写进契约**：`/.tmp` 和 `/.mem` 是每个 fs 实现都必须提供的目录。`OpenWorkspace` 构造完 fs 后 `Stat` 这两个目录，缺一个就 fail-fast —— 未来的 `fs-mem` / `fs-single-file` 在接入点就被卡住
+  - **Workspace 接管 fs**：`WorkspaceConfig` 新增 `FS FSConfig`（sealed interface，当前只有 `LocalFSConfig{Path}`），`Workspace` 持有 `fs.FileService` 并通过 `FS()` 暴露；`Close()` 负责释放 watcher
+  - **`Call` 成为唯一执行入口**：删除 `Funcs()`。AI 调用和直接函数调用走同一条路径，门控与事件广播完全一致
+  - **`Tools()` 成为唯一投影**：删除 `Func` 类型与 `Funcs()`，`ToolInfo` 只保留 `ID` / `Description` / `Schema`
+  - **删除 `Internal()`**：可见性开关随双投影一起退场，不再需要
+  - **删除 `ReloadablePlugin` / `UpdatePluginConfig` / `ServicePlugin` / `Service()`**：热更新配置和"暴露内部服务对象"两条路都删掉；需要内部服务的实现自己持有引用即可
+  - **删除 `tools/builtin` 子包**：`util.echo` 收进 `tools` 包（`tools.Echo()`），仍然 opt-in（不自动注册）
+  - **删除 `id` 包**：`id.Init` 只在 `OpenWorkspace` 里被调一次，`id.Next` 没有任何调用方——snowflake ID 工厂没有实际用途，`WorkspaceConfig.WorkerID` 一并删除
+  - **删除 `meta` 预留 key**：`plugin/` 命名空间（`KindPlugin` / `PluginKey`）从未被使用，删除
+  - **`tools/builtin/service.go` 的 `FileService` / `FileEntry` / `ListPage`** 与 fs-api 重复，删除
+  - **`plugins/localfs/plugin.go` 整个容器**（10 个 tool 定义 + `ServicePlugin` / `StatefulPlugin` 实现）删除 —— 文件能力不再是 plugin，而是工作区文件系统
+- 验证：`go build ./...` + `go vet ./...` + `go test ./...` 全绿；新增 `fs/local/local_test.go` 的 watcher 用例、根包 `ndrive_test.go`（fs 约定目录 / FS 必填 / 读写往返）
+
+### Spec 18: v6 架构重构 —— 去掉 Plugin 容器层
+
+- 动机：Spec 12 引入的 Plugin/Tool 两层模型在实践中没有兑现收益。容器层只提供两样东西：
+  1. **id 拼接规则** —— 完整 id = `"<Plugin.ID()>.<Tool.ID()>"`，还要为"单 tool 容器"专门发明"tool 的 ID() 返回空字符串"的约定，以及 `AsPlugin` / `singleToolPlugin` / `bareIDTool` 三个包装类型来兜住这个特例
+  2. **共享状态的兄弟 tool** —— 但这件事用闭包捕获就够了（`fsvc := ws.FS()` 然后两个 tool 都捕获 `fsvc`）
+
+  代价却是实打实的：注册表要维护两张表（`tools` + `containers`）和第三张 `lifecycleTargets`；`Register(v any, cfg any)` 的入参是 `any`，类型错误推迟到运行时；`RegisterAll([]Plugin)` 与 `Register` 的行为不对称；容器级依赖无法表达"tool A 依赖 X、tool B 依赖 Y"；文档里每一处 id 都要解释"完整 id 怎么来的"。
+- 变更（`tools` 包接口形状全部变化）：
+  - **删除 `Plugin` 接口**：`ID() PluginID` + `Tools() []Tool` 整体退场
+  - **删除 `SimplePluginDef`**，改为 **`ToolDef`**：字段不变（`ID_` / `Description_` / `Schema_` / `Read_` / `Fn_` / `DependsOn_`），但它只实现 `Tool` + `DependentTool`，不再实现 `Plugin`
+  - **删除 `AsPlugin` / `singleToolPlugin` / `bareIDTool`**：三个包装类型连同"空 tool id 表示不拼接"的规则一起删除
+  - **`PluginID` → `ToolID`**，`ValidatePluginID` → `ValidateToolID`（规则不变：>= 2 段点分）
+  - **错误重命名**：`ErrPluginNotFound` / `ErrPluginDuplicate` / `ErrPluginInvalid` / `ErrPluginCycle` → `ErrToolNotFound` / `ErrToolDuplicate` / `ErrToolInvalid` / `ErrToolCycle`；`CycleError.Cycle` 的元素类型改为 `[]ToolID`
+  - **`DependentPlugin` → `DependentTool`**：依赖声明从容器级回到 tool 级（Spec 14 的下放被 Spec 18 撤销），依赖图节点是 tool id
+  - **`StatefulPlugin` → `StatefulTool`**：`StartPlugin` / `StopPlugin` 改为 `StartTool` / `StopTool`（方法名带 `Tool` 后缀，避免与用户类型上同名但不同签名的方法意外撞上）
+  - **`ToolsAPI.Register(t Tool, cfg any)`**：入参从 `any` 收窄成 `Tool`，编译期就能挡住传错类型；`RegisterAll(ts []Tool)` 同理
+  - **`ToolsAPI.StopAllPlugins()` → `StopAll()`**：对所有 `StatefulTool` 调 `StopTool`，按 tool id 字典序停止（顺序确定），错误 `errors.Join` 汇总
+  - **`ToolsAPI.Resolve()`** 返回 tool id 的拓扑序（不再是容器 id）
+  - **`CallEvent.PluginID` → `CallEvent.ToolID`**（json tag `plugin_id` → `tool_id`）
+  - **事件 topic 前缀 `plugin.` → `tool.`**：`tool.<id>.start` / `.done` / `.error`
+  - **`Workspace.Register(p any, cfg any)` → `Register(t tools.Tool, cfg any)`**，`Close()` 改调 `StopAll()`
+  - **`tools.Echo()` 返回 `Tool`**（原返回 `Plugin`）
+  - **删除 `tools` 包里所有 "plugin" 字样**：包注释、`Tool` 注释、`Context` 注释全部改为 tool 措辞
+- 影响面：`tools` 包的四个源文件 + 四个测试文件整体重写；根包 `workspace.go`；`permission` / `fs` 的注释措辞；`e2e` 两个测试；`examples/local/{tool_registration,events,permission,storage}` 四个示例；`ARCHITECTURE.md` / `README.md` / `README_en.md`
+- 已知遗留：`tools.Context` 仍然只有 `Bus()` / `Checker()` / `API()`，**没有 `FS()`** —— tool 要用工作区文件系统只能靠闭包捕获 `ws.FS()`。`func` 加载器落地时需要决定是把 `FS()` 提到 `tools.Context`（`tools → fs` 依赖成立），还是由加载器在注册时注入
+- 验证：`go build ./...` + `go vet ./...` + `go test ./...` 全绿；`grep -rni plugin --include=*.go .` 无残留
+
+### Spec 19: v6 架构重构 —— 配置契约开放化 + 权限语义澄清 + 文件变更上总线
+
+- 动机：三件事互相独立，但都指向同一个问题——**框架把选择权收得太紧**。
+  1. **配置契约是 sealed 的**：`FSConfig` / `MetaConfig` 带未导出标记方法（`isFSConfig()` / `isMetaConfig()`），只有根包内的类型能实现。用户想接自己的存储后端，只能改根包加分支——而这正是框架应该挡住的"改框架"成本
+  2. **权限四档的名字在说谎**：`RAsk < R < WAsk < W` 看起来是一条严格度链，实际四档是读/写两个维度的四象限。`R`（只读）和 `W`（只写）谁更严？取决于操作，没有答案
+  3. **文件变更没有出口**：`fs` 实现了变更监听，但事件只走 `Events()` channel——工作区外面（UI、agent 运行时）拿不到，唯一的取法是把 `fs.FileService` 泄漏给订阅方自己 cast
+
+- 变更：
+
+  **（一）配置契约开放化**
+
+  - `fs` 包新增 `Config` 接口：`NewFileService(ctx) (FileService, error)`
+  - `meta` 包新增 `Config` 接口：`NewStore(ctx) (Store, error)`
+  - **配置对象自己负责初始化**：实现方把"怎么造出自己"写在自己包里，根包不 switch、不认实现类型
+  - `fs/local/config.go` 新增 `local.Config{Path, Watch, WatchDebounce, MaxReadSize}`，实现 `fs.Config`
+  - `meta/sqlite`、`meta/mysql` 各自的 `Config` 实现 `meta.Config`
+  - 根包 `WorkspaceConfig` 收缩成两个字段：`Meta meta.Config` / `FS fs.Config`；`MetaConfig` / `SqliteConfig` / `MysqlConfig` / `FSConfig` / `LocalFSConfig` 全部删除
+  - **根包不再 import `fs/local` / `meta/sqlite` / `meta/mysql`**——新增后端 = 新增一个实现包，根包零改动
+  - 根包在装配时仍校验 `/.tmp`、`/.mem` 两个约定目录存在（fail-fast），但**创建**由实现方负责
+
+  **（二）权限四档改名 + 语义澄清**
+
+  - `RAsk` → `ModeWriteAsk`（读放行 / 写询问，零值，默认档）
+  - `R` → `ModeReadOnly`（读放行 / 写拒绝）
+  - `WAsk` → `ModeAskAll`（读写都询问）
+  - `W` → `ModeWriteOnly`（写放行 / 读拒绝）
+  - **数值不变**（iota 顺序不动）：`0=写询问 1=只读 2=全询问 3=只写`，历史持久化数据一一对应，改名不改值
+  - 文档明确写清：这四档**不是一条严格度链**，是读/写两维的四象限
+  - `Checker` 改成 **fail-closed**：查不到绑定 / 模式值不认识，一律 `ErrPermissionDenied`，不靠默认值放行
+
+  **（三）删掉 `StatefulTool` 生命周期层**
+
+  - 删除 `StatefulTool` 接口（`StartTool` / `StopTool`）与 `ToolsAPI.StopAll()`
+  - `ToolsAPI.Register(t Tool, cfg any)` → `Register(t Tool)`；`Workspace.Register` 同步收窄
+  - `RegisterAll` 保留依赖校验 + 拓扑排序 + 一次性 commit，不再有"启动 / 逆序回滚"
+  - `Workspace.Close()` 不再停 tool，只关 fs + meta store
+
+  **（四）文件变更接入 bus**
+
+  - `fs` 包新增 `TopicChange = "fs.change"`（跨包约定常量，bus 不支持通配符订阅，所有变更走同一个 topic）
+  - `fs.Op` 实现 `MarshalJSON` / `UnmarshalJSON`（字符串形式 `created` / `modified` / `removed` / `renamed`），`fs.Event` 加 json tag——过 bus 到 UI 时人眼可读
+  - 根包新增 `fsevents.go`：`bridgeFSEvents(bus, fs)` —— 实现 `fs.Watcher` 时起一个 goroutine，把 `Events()` 的事件 `Publish` 到 `fs.TopicChange`。**`fs` 包不依赖 bus**（存储层不该知道消息总线存在），桥接点集中在一个文件
+  - **`fs/local` 的事件合并重写**（`go-filewatcher` 自带的防抖有两个坑：全局防抖把同一批里其它文件的事件全丢掉；按路径防抖只保留最后一条，把"新建文件"抹成"修改"）：
+    - 自己在本地按路径合并，窗口内同一路径的多个底层事件合并成一条，**优先级 创建 > 删除 > 修改**
+    - **新目录补扫**：底层 watcher 是收到"目录创建"事件之后才把目录挂上监听的，所以"目录建好之后、监听挂上之前"写进去的文件它永远看不到——`Write` 里的"建目录 + 写文件"是挨着执行的，正好落在这个窗口里。收到目录创建事件时把整棵新目录扫一遍，补成创建事件
+    - 已报过创建的路径短期内不重复报（补扫和底层事件可能指向同一个文件）
+
+- 影响面：`fs` / `fs/local` / `meta` / `meta/sqlite` / `meta/mysql` / `permission` / `tools` 四个源文件 + 根包 `config.go` / `ndrive.go` / `workspace.go` + 新增 `fsevents.go` / `fs/local/config.go`；`e2e` 测试与全部示例；`ARCHITECTURE.md` / `README.md` / `README_en.md` / `RELEASE.md`
+- 验证：`go build ./...` + `go vet ./...` + `go test ./...` 全绿；新增 `fs/local/watch_test.go`（新目录 / 已有目录 / 同批多文件 / 删除 / 约定目录）、`ndrive_customfs_test.go`（自研 fs 后端接入 + 变更事件上总线）
+
 ## 实施顺序
 
-按 spec 编号顺序：
+v5 阶段（Spec 1–11）按 spec 编号顺序：
 
 ```
 Spec 1 → Spec 2 ┐
@@ -224,3 +328,15 @@ Spec 1 → Spec 2 ┐
 ```
 
 实际可并行：Spec 5 等 Spec 2 + 4；Spec 8/9/10 互相独立可并行；Spec 11 必须在所有之后。
+
+v6 阶段（Spec 17–19）是三次连续的架构重构，每一刀都改写前一刀的接口形状：
+
+```
+Spec 17 (fs-api + 单一执行入口)
+   ↓
+Spec 18 (去掉 Plugin 容器层)
+   ↓
+Spec 19 (配置契约开放化 + 权限语义澄清 + 文件变更上总线)
+```
+
+Spec 17/18/19 依次落地，后一刀依赖前一刀的结果；每一刀内部按"契约 → 实现 → 测试 → 文档"的顺序推进。

@@ -7,13 +7,15 @@ import (
 	"testing"
 
 	"github.com/wyx0k/ndrive"
+	"github.com/wyx0k/ndrive/fs/local"
+	"github.com/wyx0k/ndrive/meta/sqlite"
 )
 
 func openWS(t *testing.T, id string) *ndrive.Workspace {
 	t.Helper()
 	ws, err := ndrive.OpenWorkspace(context.Background(), id, "u1", ndrive.WorkspaceConfig{
-		WorkerID: 1,
-		Meta:     ndrive.SqliteConfig{Path: ":memory:"},
+		Meta: sqlite.Config{Path: ":memory:"},
+		FS:   local.Config{Path: t.TempDir()},
 	})
 	if err != nil {
 		t.Fatalf("OpenWorkspace: %v", err)

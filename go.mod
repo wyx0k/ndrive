@@ -3,9 +3,7 @@ module github.com/wyx0k/ndrive
 go 1.27.0
 
 require (
-	github.com/bwmarrin/snowflake v0.3.0
 	github.com/larsartmann/go-filewatcher/v2 v2.4.2
-	gopkg.in/yaml.v3 v3.0.1
 	gorm.io/driver/mysql v1.6.0
 	gorm.io/driver/sqlite v1.6.0
 	gorm.io/gorm v1.31.2

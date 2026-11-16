@@ -1,4 +1,4 @@
-package localfs
+package local
 
 import (
 	"context"

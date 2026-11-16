@@ -3,7 +3,7 @@
 // v5 设计要点：
 //   - 改名 policy → permission（全仓库统一）
 //   - owner_id → user_id
-//   - Checker 拆成 CheckRead / CheckWrite（plugin.Read() 路由）
+//   - Checker 拆成 CheckRead / CheckWrite（tool.Read() 路由）
 //   - 每 user 一个 mode（Binding 按 (wsID, userID) 唯一索引）
 //   - AskPayload.Preview 允许空字符串
 //   - 无订阅者返 ErrPermissionDenied
@@ -23,31 +23,45 @@ import (
 // ErrPermissionDenied 是 permission 拒绝时的统一错误。
 var ErrPermissionDenied = errors.New("permission denied")
 
-// Mode 权限档位。
+// Mode 权限档位：决定「读」「写」两类操作各自的处置方式。
+//
+// 四档语义（读 | 写）：
+//
+//	ModeReadOnly    放行 | 拒绝    只读：写操作一律拒绝
+//	ModeWriteAsk    放行 | 询问    读直接放行；写发 permission.ask 询问
+//	ModeAskAll      询问 | 询问    读写都要人工确认
+//	ModeWriteOnly   拒绝 | 放行    只写：读操作一律拒绝
+//
+// 这四档**不是一条严格度链**——ModeReadOnly 与 ModeWriteAsk 都放行读，
+// ModeAskAll 与 ModeWriteAsk 都要问写。选哪一档取决于两件事：读要不要、
+// 写要不要问。
+//
+// 数值（iota）与历史持久化数据一一对应，改名不改值：
+// 0=写询问 1=只读 2=全询问 3=只写。
 type Mode int
 
 const (
-	// RAsk 只读模式，所有读 op 直接放行；写 op 发 permission.ask 询问
-	RAsk Mode = iota
-	// R 严格只读，写 op 一律拒绝
-	R
-	// WAsk 默认写模式，所有 op（读/写）都发 permission.ask 询问
-	WAsk
-	// W 全权限写模式，所有写 op 直接放行；读 op 拒绝
-	W
+	// ModeWriteAsk 读放行 / 写询问。零值，也是最常用的默认档。
+	ModeWriteAsk Mode = iota
+	// ModeReadOnly 读放行 / 写拒绝。
+	ModeReadOnly
+	// ModeAskAll 读写都询问。
+	ModeAskAll
+	// ModeWriteOnly 读拒绝 / 写放行。
+	ModeWriteOnly
 )
 
 // String 实现 fmt.Stringer；用于日志和持久化展示。
 func (m Mode) String() string {
 	switch m {
-	case RAsk:
-		return "RAsk"
-	case R:
-		return "R"
-	case WAsk:
-		return "WAsk"
-	case W:
-		return "W"
+	case ModeWriteAsk:
+		return "WriteAsk"
+	case ModeReadOnly:
+		return "ReadOnly"
+	case ModeAskAll:
+		return "AskAll"
+	case ModeWriteOnly:
+		return "WriteOnly"
 	}
 	return fmt.Sprintf("Mode(%d)", int(m))
 }
@@ -96,7 +110,7 @@ type WorkspaceStore interface {
 }
 
 // Checker 是 permission 门控的核心接口。
-// v5 拆成 CheckRead / CheckWrite 两个方法（plugin.Read() 路由）。
+// v5 拆成 CheckRead / CheckWrite 两个方法（tool.Read() 路由）。
 type Checker interface {
 	CheckRead(ctx context.Context, op string) error
 	CheckWrite(ctx context.Context, op string) error
@@ -127,35 +141,38 @@ func (c *checker) CheckWrite(ctx context.Context, op string) error {
 }
 
 // check 统一逻辑：read=true 是读，read=false 是写。
+//
+// fail-closed：拿不到 binding（用户没配权限）或 mode 越界，一律拒绝。
 func (c *checker) check(ctx context.Context, op string, read bool) error {
 	b, err := c.store.GetBinding(ctx, c.wsID, c.userID)
 	if err != nil {
-		return err
+		// 没有 binding = 没授权 = 默认拒绝（而不是把底层错误透出去，
+		// 让调用方分不清"没权限"和"存储挂了"）。
+		return fmt.Errorf("%w: op=%s (no binding for user %s: %v)", ErrPermissionDenied, op, c.userID, err)
 	}
 	write := !read
 	switch b.Mode {
-	case W:
+	case ModeWriteOnly:
 		if write {
 			return nil
 		}
-		return fmt.Errorf("%w: op=%s mode=W (read op not allowed)", ErrPermissionDenied, op)
-	case WAsk:
-		if !write {
-			// WAsk 对读也走 ask
-		}
+		return fmt.Errorf("%w: op=%s mode=WriteOnly (read op not allowed)", ErrPermissionDenied, op)
+	case ModeAskAll:
+		// 读写都要问。
 		return c.ask(ctx, op)
-	case R:
+	case ModeReadOnly:
 		if write {
-			return fmt.Errorf("%w: op=%s mode=R (write op not allowed)", ErrPermissionDenied, op)
+			return fmt.Errorf("%w: op=%s mode=ReadOnly (write op not allowed)", ErrPermissionDenied, op)
 		}
 		return nil
-	case RAsk:
+	case ModeWriteAsk:
 		if !write {
 			return nil
 		}
 		return c.ask(ctx, op)
 	}
-	return nil
+	// 未知 mode（脏数据 / 历史越界）→ 拒绝。
+	return fmt.Errorf("%w: op=%s unknown mode %d", ErrPermissionDenied, op, int(b.Mode))
 }
 
 // ask 发 permission.ask 请求到 bus，等 UI 端 AskResponse。

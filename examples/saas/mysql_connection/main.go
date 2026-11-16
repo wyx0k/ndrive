@@ -26,13 +26,15 @@ import (
 	"strconv"
 
 	"github.com/wyx0k/ndrive"
+	"github.com/wyx0k/ndrive/fs/local"
+	"github.com/wyx0k/ndrive/meta/mysql"
 	"github.com/wyx0k/ndrive/permission"
 )
 
 func main() {
 	ctx := context.Background()
 
-	meta := ndrive.MysqlConfig{
+	meta := mysql.Config{
 		Host:         envOr("NDRIVE_MYSQL_HOST", "127.0.0.1"),
 		Port:         envInt("NDRIVE_MYSQL_PORT", 3306),
 		User:         envOr("NDRIVE_MYSQL_USER", "root"),
@@ -44,8 +46,8 @@ func main() {
 
 	// 租户 A：workspace "tenant-a"，owner 是 "alice"。
 	wsA, err := ndrive.OpenWorkspace(ctx, "tenant-a", "alice", ndrive.WorkspaceConfig{
-		WorkerID: 1, // 每个进程/实例分配不同的 WorkerID，避免 snowflake id 冲突
-		Meta:     meta,
+		Meta: meta,
+		FS:   local.Config{Path: "./ndrive-tenant-a"},
 	})
 	if err != nil {
 		panic(err)
@@ -54,8 +56,8 @@ func main() {
 
 	// 租户 B：同一个 MySQL 实例，workspace "tenant-b"，owner 是 "bob"。
 	wsB, err := ndrive.OpenWorkspace(ctx, "tenant-b", "bob", ndrive.WorkspaceConfig{
-		WorkerID: 2,
-		Meta:     meta,
+		Meta: meta,
+		FS:   local.Config{Path: "./ndrive-tenant-b"},
 	})
 	if err != nil {
 		panic(err)
@@ -63,8 +65,8 @@ func main() {
 	defer wsB.Close()
 
 	// 两个 workspace 的 permission binding 互相隔离。
-	must(wsA.SetPolicy(ctx, "alice", permission.W))
-	must(wsB.SetPolicy(ctx, "bob", permission.R))
+	must(wsA.SetPolicy(ctx, "alice", permission.ModeWriteOnly))
+	must(wsB.SetPolicy(ctx, "bob", permission.ModeReadOnly))
 
 	modeA, _ := wsA.GetPolicy(ctx, "alice")
 	modeB, _ := wsB.GetPolicy(ctx, "bob")

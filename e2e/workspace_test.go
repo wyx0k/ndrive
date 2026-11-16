@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/wyx0k/ndrive"
+	"github.com/wyx0k/ndrive/meta/sqlite"
 	"github.com/wyx0k/ndrive/tools"
 )
 
@@ -38,14 +39,14 @@ func TestOpenWorkspaceAPI(t *testing.T) {
 	if ws.API() == nil {
 		t.Fatal("API should not be nil")
 	}
-	if err := ws.Register(tools.SimplePluginDef{
+	if err := ws.Register(tools.ToolDef{
 		ID_:          "util.echo",
 		Description_: "echo",
 		Read_:        true,
 		Fn_: func(_ context.Context, _ tools.Context, args any) (any, error) {
 			return args, nil
 		},
-	}, nil); err != nil {
+	}); err != nil {
 		t.Errorf("Register: %v", err)
 	}
 	tl := ws.API().Tools()
@@ -72,7 +73,7 @@ func TestOpenWorkspaceContext(t *testing.T) {
 
 func TestOpenWorkspaceEmptyID(t *testing.T) {
 	_, err := ndrive.OpenWorkspace(context.Background(), "", "u1", ndrive.WorkspaceConfig{
-		Meta: ndrive.SqliteConfig{Path: ":memory:"},
+		Meta: sqlite.Config{Path: ":memory:"},
 	})
 	if err == nil {
 		t.Error("want error for empty wsID")
@@ -81,7 +82,7 @@ func TestOpenWorkspaceEmptyID(t *testing.T) {
 
 func TestOpenWorkspaceEmptyUserID(t *testing.T) {
 	_, err := ndrive.OpenWorkspace(context.Background(), "ws", "", ndrive.WorkspaceConfig{
-		Meta: ndrive.SqliteConfig{Path: ":memory:"},
+		Meta: sqlite.Config{Path: ":memory:"},
 	})
 	if err == nil {
 		t.Error("want error for empty userID")

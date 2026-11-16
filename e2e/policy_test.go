@@ -12,14 +12,14 @@ func TestSetGetPolicy(t *testing.T) {
 	ws := openWS(t, "policy-setget")
 	ctx := context.Background()
 
-	if err := ws.SetPolicy(ctx, "alice", permission.W); err != nil {
+	if err := ws.SetPolicy(ctx, "alice", permission.ModeWriteOnly); err != nil {
 		t.Fatalf("SetPolicy: %v", err)
 	}
 	m, err := ws.GetPolicy(ctx, "alice")
 	if err != nil {
 		t.Fatalf("GetPolicy: %v", err)
 	}
-	if m != permission.W {
+	if m != permission.ModeWriteOnly {
 		t.Errorf("got mode %v, want W", m)
 	}
 }
@@ -28,11 +28,11 @@ func TestSetPolicyOverwrite(t *testing.T) {
 	ws := openWS(t, "policy-overwrite")
 	ctx := context.Background()
 
-	_ = ws.SetPolicy(ctx, "alice", permission.R)
-	_ = ws.SetPolicy(ctx, "alice", permission.W)
+	_ = ws.SetPolicy(ctx, "alice", permission.ModeReadOnly)
+	_ = ws.SetPolicy(ctx, "alice", permission.ModeWriteOnly)
 
 	m, _ := ws.GetPolicy(ctx, "alice")
-	if m != permission.W {
+	if m != permission.ModeWriteOnly {
 		t.Errorf("after overwrite: got %v, want W", m)
 	}
 }
@@ -51,9 +51,9 @@ func TestListPolicies(t *testing.T) {
 	ws := openWS(t, "policy-list")
 	ctx := context.Background()
 
-	_ = ws.SetPolicy(ctx, "alice", permission.R)
-	_ = ws.SetPolicy(ctx, "bob", permission.W)
-	_ = ws.SetPolicy(ctx, "carol", permission.RAsk)
+	_ = ws.SetPolicy(ctx, "alice", permission.ModeReadOnly)
+	_ = ws.SetPolicy(ctx, "bob", permission.ModeWriteOnly)
+	_ = ws.SetPolicy(ctx, "carol", permission.ModeWriteAsk)
 
 	bs, err := ws.ListPolicies(ctx)
 	if err != nil {
@@ -66,13 +66,13 @@ func TestListPolicies(t *testing.T) {
 	for _, b := range bs {
 		users[b.UserID] = b.Mode
 	}
-	if users["alice"] != permission.R {
+	if users["alice"] != permission.ModeReadOnly {
 		t.Errorf("alice: %v", users["alice"])
 	}
-	if users["bob"] != permission.W {
+	if users["bob"] != permission.ModeWriteOnly {
 		t.Errorf("bob: %v", users["bob"])
 	}
-	if users["carol"] != permission.RAsk {
+	if users["carol"] != permission.ModeWriteAsk {
 		t.Errorf("carol: %v", users["carol"])
 	}
 }
@@ -81,7 +81,7 @@ func TestDeletePolicy(t *testing.T) {
 	ws := openWS(t, "policy-delete")
 	ctx := context.Background()
 
-	_ = ws.SetPolicy(ctx, "alice", permission.W)
+	_ = ws.SetPolicy(ctx, "alice", permission.ModeWriteOnly)
 	if err := ws.DeletePolicy(ctx, "alice"); err != nil {
 		t.Fatalf("DeletePolicy: %v", err)
 	}
@@ -92,7 +92,7 @@ func TestDeletePolicy(t *testing.T) {
 
 func TestSetPolicyEmptyUserID(t *testing.T) {
 	ws := openWS(t, "policy-empty")
-	if err := ws.SetPolicy(context.Background(), "", permission.W); err == nil {
+	if err := ws.SetPolicy(context.Background(), "", permission.ModeWriteOnly); err == nil {
 		t.Error("want error for empty userID")
 	}
 }
@@ -102,8 +102,8 @@ func TestPolicyEndToEnd(t *testing.T) {
 	ws := openWS(t, "policy-e2e") // ws 的 userID 是 "u1"
 	ctx := context.Background()
 
-	// 设置 u1 为 RAsk
-	if err := ws.SetPolicy(ctx, "u1", permission.RAsk); err != nil {
+	// 设置 u1 为 ModeWriteAsk
+	if err := ws.SetPolicy(ctx, "u1", permission.ModeWriteAsk); err != nil {
 		t.Fatalf("SetPolicy: %v", err)
 	}
 
@@ -122,19 +122,19 @@ func TestPolicyEndToEnd(t *testing.T) {
 		t.Fatalf("Handle: %v", err)
 	}
 
-	// 注册一个写 plugin
-	if err := ws.Register(tools.SimplePluginDef{
+	// 注册一个写 tool
+	if err := ws.Register(tools.ToolDef{
 		ID_:          "user.send",
 		Description_: "send",
-		Read_:        false, // 写
+		Read_:        false,
 		Fn_: func(_ context.Context, _ tools.Context, args any) (any, error) {
 			return args, nil
 		},
-	}, nil); err != nil {
+	}); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 
-	// 调用：u1 是 RAsk + 写 op → 走 ask → handler approve → 成功
+	// 调用：u1 是 ModeWriteAsk + 写 op → 走 ask → handler approve → 成功
 	if _, err := ws.API().Call(ctx, "user.send", "payload"); err != nil {
 		t.Errorf("Call: %v", err)
 	}

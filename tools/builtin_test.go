@@ -1,4 +1,4 @@
-package builtin_test
+package tools_test
 
 import (
 	"context"
@@ -8,33 +8,27 @@ import (
 	"github.com/wyx0k/ndrive/bus"
 	"github.com/wyx0k/ndrive/permission"
 	"github.com/wyx0k/ndrive/tools"
-	"github.com/wyx0k/ndrive/tools/builtin"
 )
 
 func TestEchoMetadata(t *testing.T) {
-	p := builtin.Echo()
+	p := tools.Echo()
 	if p.ID() != "util.echo" {
 		t.Errorf("ID: %q", p.ID())
 	}
-	tl := p.Tools()
-	if len(tl) != 1 {
-		t.Fatalf("want 1 tool, got %d", len(tl))
-	}
-	tool := tl[0]
-	if tool.Description() == "" {
+	if p.Description() == "" {
 		t.Error("Description should be non-empty")
 	}
-	if !tool.Read() {
+	if !p.Read() {
 		t.Error("Echo should be Read=true")
 	}
-	if tool.Schema() == nil {
+	if p.Schema() == nil {
 		t.Error("Schema should be non-nil")
 	}
 }
 
 func TestEchoBehavior(t *testing.T) {
 	api := tools.NewToolsAPI(&busBusContext{bus: bus.New()})
-	if err := api.Register(builtin.Echo(), nil); err != nil {
+	if err := api.Register(tools.Echo()); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 

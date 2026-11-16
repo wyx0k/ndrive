@@ -3,10 +3,9 @@
 // 内聚设计：本包是 ndrive meta 存储的"唯一真源"，任何持久化 key 都从这里导出。
 // 上层（根 ndrive 包）不直接拼 key 字符串，全部走本包的 typed facade。
 //
-// 三个 facade：
+// 两个 facade：
 //   - WorkspaceStore    workspace/<id>                  元信息（id + userID）
 //   - PermissionStore   permission_binding/<wsID>/<userID>  权限绑定
-//   - （未来）PluginStore  plugin/<id>                    描述符
 //
 // 底层：
 //   - Store interface 通用 KV（实现方：sqlite / mysql）
@@ -31,6 +30,15 @@ type Store interface {
 	Delete(ctx context.Context, key string) error
 	List(ctx context.Context, prefix string) ([]Record, error)
 	Close() error
+}
+
+// Config 是 meta 存储配置的契约：配置对象负责把自己初始化成 Store。
+//
+// 实现方（meta/sqlite、meta/mysql 等）提供自己的 Config 类型并实现
+// NewStore；根包只持有这个接口，不认识任何具体实现——新增后端不用改根包。
+type Config interface {
+	// NewStore 按配置初始化出一个 Store。
+	NewStore(ctx context.Context) (Store, error)
 }
 
 // 公共错误。

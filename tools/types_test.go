@@ -8,30 +8,30 @@ import (
 	"github.com/wyx0k/ndrive/tools"
 )
 
-// 编译期断言：SimplePluginDef 同时实现 Tool（单个可调用单元）和 Plugin
-// （单 tool 容器，容器 id = ID_）。
-var _ tools.Tool = tools.SimplePluginDef{}
-var _ tools.Plugin = tools.SimplePluginDef{}
+// 编译期断言：ToolDef 同时实现 Tool（唯一可调用单元）和 DependentTool
+// （可选的依赖声明）。
+var _ tools.Tool = tools.ToolDef{}
+var _ tools.DependentTool = tools.ToolDef{}
 
-// --- PluginID.Validate ---
+// --- ToolID.Validate ---
 
-func TestPluginIDValidate(t *testing.T) {
+func TestToolIDValidate(t *testing.T) {
 	cases := []struct {
-		id    tools.PluginID
+		id    tools.ToolID
 		valid bool
 	}{
-		{"", false},               // 空
-		{"foo", false},            // 单段
-		{"foo.bar", true},         // 2 段
+		{"", false},                 // 空
+		{"foo", false},              // 单段
+		{"foo.bar", true},           // 2 段
 		{"store.userdb.read", true}, // 3 段
-		{"util.echo", true},       // 2 段
-		{"foo..bar", false},       // 中间有空段
-		{".foo", false},           // 开头空段
-		{"foo.", false},           // 结尾空段
-		{"a.b.c.d.e", true},       // 多段
+		{"util.echo", true},         // 2 段
+		{"foo..bar", false},         // 中间有空段
+		{".foo", false},             // 开头空段
+		{"foo.", false},             // 结尾空段
+		{"a.b.c.d.e", true},         // 多段
 	}
 	for _, c := range cases {
-		err := tools.ValidatePluginID(c.id)
+		err := tools.ValidateToolID(c.id)
 		if c.valid && err != nil {
 			t.Errorf("id %q: want valid, got err=%v", c.id, err)
 		}
@@ -41,15 +41,15 @@ func TestPluginIDValidate(t *testing.T) {
 	}
 }
 
-// --- SimplePluginDef implements Tool ---
+// --- ToolDef implements Tool ---
 
-func TestSimplePluginDefImplementsPlugin(t *testing.T) {
+func TestToolDefImplementsTool(t *testing.T) {
 	// 用一个最小 def 跑一遍 getter
-	def := tools.SimplePluginDef{
+	def := tools.ToolDef{
 		ID_:          "util.echo",
 		Description_: "echo back",
 		Schema_:      map[string]any{"type": "object"},
-		DependsOn_:   []tools.PluginID{"store.userdb.read"},
+		DependsOn_:   []tools.ToolID{"store.userdb.read"},
 		Read_:        true,
 		Fn_: func(ctx context.Context, ws tools.Context, args any) (any, error) {
 			return args, nil
@@ -65,24 +65,21 @@ func TestSimplePluginDefImplementsPlugin(t *testing.T) {
 	if p.Read() != true {
 		t.Error("Read: false")
 	}
-	if p.Internal() != false {
-		t.Error("Internal: want false (default exported)")
-	}
 	if p.Schema()["type"] != "object" {
 		t.Errorf("Schema: %v", p.Schema())
 	}
 
-	// DependsOn 是容器（Plugin）级别的：def 同时实现 DependentPlugin
-	var dp tools.DependentPlugin = def
+	// DependsOn 是 tool 级别的：def 同时实现 DependentTool
+	var dp tools.DependentTool = def
 	if len(dp.DependsOn()) != 1 || dp.DependsOn()[0] != "store.userdb.read" {
 		t.Errorf("DependsOn: %v", dp.DependsOn())
 	}
 }
 
-// --- SimplePluginDef.Call ---
+// --- ToolDef.Call ---
 
-func TestSimplePluginDefCallSuccess(t *testing.T) {
-	def := tools.SimplePluginDef{
+func TestToolDefCallSuccess(t *testing.T) {
+	def := tools.ToolDef{
 		ID_: "util.echo",
 		Fn_: func(ctx context.Context, ws tools.Context, args any) (any, error) {
 			return args, nil
@@ -97,8 +94,8 @@ func TestSimplePluginDefCallSuccess(t *testing.T) {
 	}
 }
 
-func TestSimplePluginDefCallNilFn(t *testing.T) {
-	def := tools.SimplePluginDef{ID_: "x"} // Fn_ 留空
+func TestToolDefCallNilFn(t *testing.T) {
+	def := tools.ToolDef{ID_: "x"} // Fn_ 留空
 	_, err := def.Call(context.Background(), nil, nil)
 	if err == nil {
 		t.Fatal("want error for nil Fn_")
@@ -107,9 +104,9 @@ func TestSimplePluginDefCallNilFn(t *testing.T) {
 
 // --- 字段下划线命名：避免和 getter 冲突 ---
 
-func TestSimplePluginDefFieldNames(t *testing.T) {
+func TestToolDefFieldNames(t *testing.T) {
 	// 直接对字段赋值是允许的（不通过 getter）
-	def := tools.SimplePluginDef{
+	def := tools.ToolDef{
 		ID_:          "a.b",
 		Description_: "d",
 		Read_:        false,
@@ -126,29 +123,27 @@ func TestSimplePluginDefFieldNames(t *testing.T) {
 	}
 }
 
-// --- 用户也可以手写 Tool 接口（不一定用 SimplePluginDef）；Register 会自动
-// 把裸 Tool 包装成单 tool Plugin 容器 ---
+// --- 用户也可以手写 Tool 接口（不一定用 ToolDef） ---
 
-type manualPlugin struct {
-	id    tools.PluginID
+type manualTool struct {
+	id    tools.ToolID
 	read  bool
 	calls int
 }
 
-func (m *manualPlugin) ID() tools.PluginID     { return m.id }
-func (m *manualPlugin) Description() string    { return "manual" }
-func (m *manualPlugin) Schema() map[string]any { return nil }
-func (m *manualPlugin) Read() bool             { return m.read }
-func (m *manualPlugin) Internal() bool         { return false }
-func (m *manualPlugin) Call(ctx context.Context, ws tools.Context, args any) (any, error) {
+func (m *manualTool) ID() tools.ToolID       { return m.id }
+func (m *manualTool) Description() string    { return "manual" }
+func (m *manualTool) Schema() map[string]any { return nil }
+func (m *manualTool) Read() bool             { return m.read }
+func (m *manualTool) Call(ctx context.Context, ws tools.Context, args any) (any, error) {
 	m.calls++
 	return nil, nil
 }
 
-func TestManualPlugin(t *testing.T) {
-	// 编译期：*manualPlugin 实现 Tool
-	var _ tools.Tool = (*manualPlugin)(nil)
-	p := &manualPlugin{id: "custom.thing", read: true}
+func TestManualTool(t *testing.T) {
+	// 编译期：*manualTool 实现 Tool
+	var _ tools.Tool = (*manualTool)(nil)
+	p := &manualTool{id: "custom.thing", read: true}
 	if p.ID() != "custom.thing" {
 		t.Errorf("ID: %q", p.ID())
 	}
@@ -163,9 +158,9 @@ func TestManualPlugin(t *testing.T) {
 
 // --- 错误透传 ---
 
-func TestSimplePluginDefCallError(t *testing.T) {
+func TestToolDefCallError(t *testing.T) {
 	want := errors.New("boom")
-	def := tools.SimplePluginDef{
+	def := tools.ToolDef{
 		ID_: "x.y",
 		Fn_: func(ctx context.Context, ws tools.Context, args any) (any, error) {
 			return nil, want
@@ -177,7 +172,7 @@ func TestSimplePluginDefCallError(t *testing.T) {
 	}
 }
 
-// --- ToolInfo / Func 投影类型是值类型（不可 nil） ---
+// --- ToolInfo 投影类型是值类型（不可 nil） ---
 
 func TestToolProjection(t *testing.T) {
 	info := tools.ToolInfo{
@@ -187,26 +182,5 @@ func TestToolProjection(t *testing.T) {
 	}
 	if info.ID != "util.echo" || info.Description != "echo" {
 		t.Error("ToolInfo fields wrong")
-	}
-}
-
-func TestFuncProjection(t *testing.T) {
-	called := false
-	fn := tools.Func{
-		ID: "util.echo",
-		Call: func(ctx context.Context, args any) (any, error) {
-			called = true
-			return "ok", nil
-		},
-	}
-	v, err := fn.Call(context.Background(), "in")
-	if err != nil {
-		t.Fatalf("Func.Call: %v", err)
-	}
-	if v != "ok" {
-		t.Errorf("Func.Call returned %v", v)
-	}
-	if !called {
-		t.Error("Func.Call did not invoke handler")
 	}
 }

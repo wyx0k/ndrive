@@ -18,6 +18,18 @@ type Config struct {
 	MaxOpenConn int
 }
 
+// NewStore 实现 meta.Config：按配置初始化出一个 meta.Store。
+func (c Config) NewStore(ctx context.Context) (meta.Store, error) {
+	s, err := New(ctx, c)
+	if err != nil {
+		return nil, err
+	}
+	return s, nil
+}
+
+// 编译期断言：Config 实现 meta.Config。
+var _ meta.Config = Config{}
+
 type record struct {
 	Key   string `gorm:"primarykey"`
 	Value []byte
